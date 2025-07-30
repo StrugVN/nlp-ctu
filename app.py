@@ -1,4 +1,14 @@
+import os
 import streamlit as st
+from pymongo import MongoClient
+from dotenv import load_dotenv
+
+load_dotenv()
+
+MONGO_URI = os.getenv("MONGO_URI")
+
+client = MongoClient(MONGO_URI)
+db = client["nlp"]
 
 st.set_page_config(page_title="Search UI", layout="centered")
 
@@ -53,7 +63,25 @@ st.markdown("</div>", unsafe_allow_html=True)
 # --- Handle click event ---
 if search_clicked:
     if query.strip():
-        print("awdawdw")
         st.success(f"🔎 You searched for: **{query}**")
+
+        # Search
+        results = (
+            db.article.find(
+                {"$text": {"$search": query}}, {"score": {"$meta": "textScore"}}
+            )
+            .sort([("score", {"$meta": "textScore"})])
+            .limit(10)
+        )
+
+        results = list(results)
+
+        # Display results
+        st.markdown("### Search Results")
+        if len(results) == 0:
+            st.markdown("No results found.")
+        else:
+            for r in results:
+                st.markdown(f"- **{r['title']}**: {r['content'][:200]}...")
     else:
         st.warning("Please enter something!")
