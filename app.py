@@ -12,6 +12,17 @@ db = client["nlp"]
 
 st.set_page_config(page_title="Search UI", layout="centered")
 
+colA, colB = st.columns([4, 1])
+with colB:
+    search_mode = st.selectbox(
+        "Search method",
+        options=["MongoDB", "Custom"],
+        index=1,  # Default to "Custom"
+        key="search_mode",
+        label_visibility="collapsed",
+    )
+
+
 # --- Custom CSS ---
 st.markdown(
     """
@@ -65,14 +76,20 @@ if search_clicked:
     if query.strip():
         st.success(f"🔎 You searched for: **{query}**")
 
-        # Search
-        results = (
-            db.article.find(
-                {"$text": {"$search": query}}, {"score": {"$meta": "textScore"}}
+        if search_mode == "MongoDB":
+            # MongoDB full-text search
+            results = (
+                db.article.find(
+                    {"$text": {"$search": query}}, {"score": {"$meta": "textScore"}}
+                )
+                .sort([("score", {"$meta": "textScore"})])
+                .limit(10)
             )
-            .sort([("score", {"$meta": "textScore"})])
-            .limit(10)
-        )
+        elif search_mode == "Custom":
+            # Simulate a custom search (replace with your logic)
+            results = db.article.find(
+                {"title": {"$regex": query, "$options": "i"}}
+            ).limit(10)
 
         results = list(results)
 
