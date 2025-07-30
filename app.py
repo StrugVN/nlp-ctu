@@ -38,8 +38,12 @@ col1, col2 = st.columns([5, 1])
 
 with col1:
     query = st.text_input(
-        "", placeholder="Search...", key="search", label_visibility="collapsed"
+        "Search box",  # give it a label for accessibility
+        placeholder="Search...",
+        key="search",
+        label_visibility="collapsed",  # hides it visually
     )
+
 
 with col2:
     search_clicked = st.button("🔍")
@@ -49,6 +53,7 @@ st.markdown("</div>", unsafe_allow_html=True)
 # --- Handle click event ---
 if search_clicked:
     if query.strip():
+        print("awdawdw")
         st.success(f"🔎 You searched for: **{query}**")
     else:
         st.warning("Please enter something!")
