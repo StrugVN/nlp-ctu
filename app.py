@@ -1,7 +1,8 @@
 import os
+import time
+from nltk.tokenize.treebank import TreebankWordDetokenizer
 import streamlit as st
 st.set_page_config(page_title="Search UI", layout="wide")
-
 from pymongo import MongoClient
 from dotenv import load_dotenv
 import pandas as pd
@@ -9,6 +10,8 @@ import py_vncorenlp
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 import concurrent.futures
+import kenlm
+from fix_tonal import beam_search_kenlm, load_vocab_from_file, generate_progressive_suggestions
 
 load_dotenv()
 
@@ -64,6 +67,9 @@ df_tf_idf_future = executor.submit(load_tf_idf)
 with st.spinner("Loading resources..."):
     stopwords = load_stopwords()
     rdrsegmenter = load_segmenter()
+    kenMlModel = kenlm.Model("vi_model_6gramVinToken.binary")
+    detokenize = TreebankWordDetokenizer().detokenize
+    vocab = load_vocab_from_file("vietDict.txt")
 
 # ---
 def rank_documents_by_query(query, tf_idf, tokenizer, stopwords):
@@ -96,8 +102,12 @@ def rank_documents_by_query(query, tf_idf, tokenizer, stopwords):
     return ranked
 
 def search_articles(query):
-    with st.spinner("Searching articles..."):
+    with st.spinner("Still loading TF-IDF data..."):
+        while not df_tf_idf_future.done():
+            time.sleep(0.1)  # Small wait to let spinner display
         df_tf_idf_full = df_tf_idf_future.result()
+
+    with st.spinner("Searching articles..."):
         results = rank_documents_by_query(query, df_tf_idf_full, rdrsegmenter, stopwords)
         result_ids = results[:10]
         result_articles = list(article_collection.find({"id": {"$in": [item[0] for item in result_ids]}}))
@@ -161,37 +171,24 @@ st.markdown(
 st.markdown('<div class="search-container">', unsafe_allow_html=True)
 col1, col2 = st.columns([5, 1])
 
-with col1:
-    query = st.text_input(
-        "Search box",
-        placeholder="Search...",
-        key="search",
-        label_visibility="collapsed",
-    )
+with st.form(key="search_form"):
+    search_cols = st.columns([5, 1])
+    with search_cols[0]:
+        query = st.text_input(
+            "Search box",
+            placeholder="Search...",
+            label_visibility="collapsed"
+        )
+    with search_cols[1]:
+        submitted = st.form_submit_button("🔍")
 
-with col2:
-    search_clicked = st.button("🔍")
 
 st.markdown("</div>", unsafe_allow_html=True)
 
-# --- Trigger on Enter or Button ---
-if 'submitted' not in st.session_state:
-    st.session_state.submitted = False
-
-# Submit when button clicked
-if search_clicked:
-    st.session_state.submitted = True
-
-# Submit when Enter is pressed (text input changes)
-if query and not st.session_state.submitted:
-    st.session_state.submitted = True
-
-# --- Perform search ---
-if st.session_state.submitted:
+if submitted and query.strip():
     if query.strip():
-        st.success(f"🔎 You searched for: **{query}**")
-
         if search_mode == MONGO_SEARCH:
+            st.success(f"🔎 You searched for: **{query}**")
             print(f"Using MongoDB search for query: {query}")
             results = list(
                 article_collection.find(
@@ -201,8 +198,20 @@ if st.session_state.submitted:
                 .limit(10)
             )
         elif search_mode == COSINE_SEARCH:
-            print(f"Using Cosine search for query: {query}")
-            results = search_articles(query)
+            searchQuery = query
+
+            beamResult = beam_search_kenlm(query.lower().split(), kenMlModel)
+            if beamResult:
+                searchQuery = detokenize(beamResult[0][0])
+            
+            if searchQuery != query:
+                st.warning(f"Did you mean: **{searchQuery}**?")
+            else:
+                st.success(f"🔎 You searched for: **{searchQuery}**")
+
+            print(f"Using Cosine search for query: {searchQuery}")
+
+            results = search_articles(searchQuery)
 
         st.markdown("### Search Results")
         if len(results) == 0:
