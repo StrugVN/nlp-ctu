@@ -11,7 +11,7 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 import concurrent.futures
 import kenlm
-from fix_tonal import beam_search_kenlm, load_vocab_from_file, generate_progressive_suggestions
+from query_processing import beam_search_kenlm, load_vocab_from_file, generate_progressive_suggestions
 
 load_dotenv()
 
@@ -61,8 +61,10 @@ def load_segmenter():
         raise e
 
 # Load TF-IDF in background
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-df_tf_idf_future = executor.submit(load_tf_idf)
+start_df_load = "df_tf_idf_future" in st.session_state
+if not start_df_load:
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    df_tf_idf_future = executor.submit(load_tf_idf)
 
 with st.spinner("Loading resources..."):
     stopwords = load_stopwords()
@@ -171,72 +173,72 @@ st.markdown(
 st.markdown('<div class="search-container">', unsafe_allow_html=True)
 col1, col2 = st.columns([5, 1])
 
+if "is_processing" not in st.session_state:
+    st.session_state.is_processing = False
+
 with st.form(key="search_form"):
     search_cols = st.columns([5, 1])
     with search_cols[0]:
         query = st.text_input(
             "Search box",
             placeholder="Search...",
-            label_visibility="collapsed"
+            label_visibility="collapsed",
+            disabled=st.session_state.is_processing
         )
     with search_cols[1]:
-        submitted = st.form_submit_button("🔍")
+        submitted = st.form_submit_button("🔍", disabled=st.session_state.is_processing)
 
 
 st.markdown("</div>", unsafe_allow_html=True)
 
 if submitted and query.strip():
-    if query.strip():
-        if search_mode == MONGO_SEARCH:
-            st.success(f"🔎 You searched for: **{query}**")
-            print(f"Using MongoDB search for query: {query}")
-            results = list(
-                article_collection.find(
-                    {"$text": {"$search": query}}, {"score": {"$meta": "textScore"}}
+    if not st.session_state.is_processing:
+        st.session_state.is_processing = True  # ⏳ Set processing state
+        
+        try:
+            if search_mode == MONGO_SEARCH:
+                st.success(f"🔎 You searched for: **{query}**")
+                print(f"Using MongoDB search for query: {query}")
+                results = list(
+                    article_collection.find(
+                        {"$text": {"$search": query}}, {"score": {"$meta": "textScore"}}
+                    )
+                    .sort([("score", {"$meta": "textScore"})])
+                    .limit(10)
                 )
-                .sort([("score", {"$meta": "textScore"})])
-                .limit(10)
-            )
-        elif search_mode == COSINE_SEARCH:
-            searchQuery = query
+            elif search_mode == COSINE_SEARCH:
+                searchQuery = query
+                beamResult = beam_search_kenlm(query.lower().split(), kenMlModel)
+                if beamResult:
+                    searchQuery = detokenize(beamResult[0][0])
 
-            beamResult = beam_search_kenlm(query.lower().split(), kenMlModel)
-            if beamResult:
-                searchQuery = detokenize(beamResult[0][0])
-            
-            if searchQuery != query:
-                st.warning(f"Did you mean: **{searchQuery}**?")
+                if searchQuery != query:
+                    st.warning(f"Showing result for **{searchQuery}** instead")
+                else:
+                    st.success(f"🔎 You searched for: **{searchQuery}**")
+
+                print(f"Using Cosine search for query: {searchQuery}")
+                results = search_articles(searchQuery)
+
+            st.markdown("### Search Results")
+            if len(results) == 0:
+                st.markdown("No results found.")
             else:
-                st.success(f"🔎 You searched for: **{searchQuery}**")
+                for r in results:
+                    image_url = "https://baosoctrang.org.vn" + r.get("avatarApp", "")
+                    page_url = "https://baosoctrang.org.vn" + r.get("pageUrl", "")
+                    col_img, col_text = st.columns([2, 5])
+                    with col_img:
+                        if image_url:
+                            st.image(image_url, use_container_width=True)
+                    with col_text:
+                        st.markdown(f"""
+                            <h3 style='margin-bottom: 0px;'>
+                                <a href="{page_url}" style="text-decoration: none; color: black;" target="_blank">{r['title']}</a>
+                            </h3>
+                        """, unsafe_allow_html=True)
+                        st.markdown(f"<p style='margin-top: 2px'>{r['content'][:500]}...</p>", unsafe_allow_html=True)
+                    st.markdown("<hr style='margin: 20px 0;'>", unsafe_allow_html=True)
 
-            print(f"Using Cosine search for query: {searchQuery}")
-
-            results = search_articles(searchQuery)
-
-        st.markdown("### Search Results")
-        if len(results) == 0:
-            st.markdown("No results found.")
-        else:
-            for r in results:
-                image_url = "https://baosoctrang.org.vn" + r.get("avatarApp", "")
-                page_url = "https://baosoctrang.org.vn" + r.get("pageUrl", "")
-                col_img, col_text = st.columns([2, 5])
-
-                with col_img:
-                    if image_url:
-                        st.image(image_url, use_container_width=True)
-
-                with col_text:
-                    st.markdown(f"""
-                        <h3 style='margin-bottom: 0px;'>
-                            <a href="{page_url}" style="text-decoration: none; color: black;" target="_blank">{r['title']}</a>
-                        </h3>
-                    """, unsafe_allow_html=True)
-                    st.markdown(f"<p style='margin-top: 2px'>{r['content'][:500]}...</p>", unsafe_allow_html=True)
-
-                st.markdown("<hr style='margin: 20px 0;'>", unsafe_allow_html=True)
-    else:
-        st.warning("Please enter something!")
-
-    # Reset trigger
-    st.session_state.submitted = False
+        finally:
+            st.session_state.is_processing = False  # ✅ Reset state

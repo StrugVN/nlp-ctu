@@ -4,8 +4,6 @@ from collections import defaultdict
 from nltk.tokenize.treebank import TreebankWordDetokenizer
 import kenlm
 
-
-# Remove Vietnamese accents
 def remove_vn_accent(word):
     word = re.sub('[áàảãạăắằẳẵặâấầẩẫậ]', 'a', word)
     word = re.sub('[éèẻẽẹêếềểễệ]', 'e', word)
@@ -16,7 +14,6 @@ def remove_vn_accent(word):
     word = re.sub('đ', 'd', word)
     return word
 
-# Load Vietnamese syllables once into a lookup
 def build_accent_lookup(filepath='all-vietnamese-syllables.txt'):
     lookup = defaultdict(set)
     with open(filepath, encoding='utf-8') as f:
@@ -25,21 +22,19 @@ def build_accent_lookup(filepath='all-vietnamese-syllables.txt'):
             lookup[key].add(w.lower())
     return lookup
 
-# Global accent map
 ACCENT_LOOKUP = build_accent_lookup()
 
-# Cached variant generator
 @lru_cache(maxsize=10000)
 def gen_accents_word_cached(word):
     key = remove_vn_accent(word.lower())
     return ACCENT_LOOKUP.get(key, {word})
 
-def beam_search_kenlm(words, model, k=3):
-    if not needs_diacritic_restoration(" ".join(words)):
+def beam_search_kenlm(words, model, k=3, force=False):
+    if not needs_diacritic_restoration(" ".join(words)) and not force:
         return []
 
     variants = [list(gen_accents_word_cached(w)) for w in words]
-    sequences = [([], 0.0)]  # (sequence_so_far, log_score)
+    sequences = [([], 0.0)]  
 
     for word_options in variants:
         new_sequences = []
@@ -54,7 +49,6 @@ def beam_search_kenlm(words, model, k=3):
 
     return sequences
 
-# Check if input text contains any Vietnamese diacritics
 VI_DIACRITIC_PATTERN = re.compile(r"[áàảãạăắằẳẵặâấầẩẫậ"
                                   r"éèẻẽẹêếềểễệ"
                                   r"íìỉĩị"
@@ -80,23 +74,23 @@ def generate_progressive_suggestions(model, prefix_words, vocab, top_k=5):
     detokenize = TreebankWordDetokenizer().detokenize
 
     suggestions = []
-    current_beam = [(0.0, prefix_words[:])]  # (score, token list)
+    current_beam = [(0.0, prefix_words[:])]  
 
     for target_len in range(len(prefix_words) + 1, len(prefix_words) + top_k + 1):
         next_beam = []
         for score, tokens in current_beam:
             for word in vocab:
                 full_seq = tokens + [word]
-                full_str = " ".join(full_seq[-3:])  # 3-gram context
+                full_str = " ".join(full_seq[-3:])  
                 new_score = score + model.score(full_str, bos=False, eos=False)
                 next_beam.append((new_score, full_seq))
-        # Select the best completed sequence of required length
+
         best = nlargest(1, [s for s in next_beam if len(s[1]) == target_len], key=lambda x: x[0])
         if best:
             suggestions.append(best[0])
-            current_beam = best  # grow from current best
+            current_beam = best
         else:
-            break  # no valid candidates left
+            break 
 
     return [(detokenize(tokens), score) for score, tokens in suggestions]
 
