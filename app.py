@@ -13,6 +13,7 @@ import concurrent.futures
 import kenlm
 from query_processing import beam_search_kenlm, load_vocab_from_file, rank_documents_by_query_enhanced, generate_progressive_suggestions
 from gensim.models import Word2Vec
+import re
 
 load_dotenv()
 
@@ -142,6 +143,46 @@ def search_articles_enhanced(query, top_k=10):
         }))
         
         return result_articles
+
+import re
+
+def generate_snippets(text: str,
+                      query: str,
+                      max_words: int = 150,
+                      num_snippets: int = 2,
+                      context_words: int = 10):
+    # 1) take the first N words
+    words = text.split()
+    first = ' '.join(words[:max_words])
+    snippet_list = [ first ]
+
+    # compile our highlight‐pattern
+    pattern = re.compile(re.escape(query), re.IGNORECASE)
+
+    # 2) for each match grab its surrounding words
+    word_list = text.split()
+    # build cumulative char counts to map char→word index
+    cum = []
+    total = 0
+    for w in word_list:
+        total += len(w) + 1
+        cum.append(total)
+
+    for match in pattern.finditer(text):
+        # find which word index contains match.start()
+        idx = next(i for i,c in enumerate(cum) if c > match.start())
+        start = max(0, idx - context_words)
+        end   = min(len(word_list), idx + context_words + 1)
+        snippet = ' '.join(word_list[start:end])
+        snippet_list.append(snippet)
+        if len(snippet_list) >= num_snippets + 1:
+            break
+
+    # 3) stitch them together with ellipses, and highlight
+    stitched = ' … '.join(snippet_list)
+    highlighted = pattern.sub(r"<mark>\g<0></mark>", stitched)
+    return f"… {highlighted} …"
+
 # ---
 
 MONGO_SEARCH = "MongoDB"
@@ -227,6 +268,7 @@ if submitted and query.strip():
             if search_mode == MONGO_SEARCH:
                 st.success(f"🔎 You searched for: **{query}**")
                 print(f"Using MongoDB search for query: {query}")
+                searchQuery = query
                 results = list(
                     article_collection.find(
                         {"$text": {"$search": query}}, {"score": {"$meta": "textScore"}}
@@ -265,7 +307,13 @@ if submitted and query.strip():
                                 <a href="{page_url}" style="text-decoration: none; color: black;" target="_blank">{r['title']}</a>
                             </h3>
                         """, unsafe_allow_html=True)
-                        st.markdown(f"<p style='margin-top: 2px'>{r['content'][:500]}...</p>", unsafe_allow_html=True)
+                        snips = generate_snippets(r['content'], searchQuery)
+
+                        snips_html = generate_snippets(r['content'], searchQuery)
+                        st.markdown(
+                            f"<p style='margin-top:2px; display:inline'>{snips_html}</p>",
+                            unsafe_allow_html=True
+                        )
                     st.markdown("<hr style='margin: 20px 0;'>", unsafe_allow_html=True)
 
         finally:
