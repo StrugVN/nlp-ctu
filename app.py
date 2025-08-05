@@ -11,7 +11,8 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 import concurrent.futures
 import kenlm
-from query_processing import beam_search_kenlm, load_vocab_from_file, generate_progressive_suggestions
+from query_processing import beam_search_kenlm, load_vocab_from_file, rank_documents_by_query_enhanced, generate_progressive_suggestions
+from gensim.models import Word2Vec
 
 load_dotenv()
 
@@ -66,12 +67,29 @@ if not start_df_load:
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     df_tf_idf_future = executor.submit(load_tf_idf)
 
+@st.cache_resource
+def load_kenlm():
+    return kenlm.Model("vi_model_6gramVinToken.binary")
+
+@st.cache_resource
+def load_detokenizer():
+    return TreebankWordDetokenizer().detokenize
+
+@st.cache_data
+def load_vocab():
+    return load_vocab_from_file("vietDict.txt")
+
+@st.cache_resource
+def load_w2v():
+    return Word2Vec.load("word2vec_vi_bao_st.model")
+
 with st.spinner("Loading resources..."):
-    stopwords = load_stopwords()
-    rdrsegmenter = load_segmenter()
-    kenMlModel = kenlm.Model("vi_model_6gramVinToken.binary")
-    detokenize = TreebankWordDetokenizer().detokenize
-    vocab = load_vocab_from_file("vietDict.txt")
+    stopwords       = load_stopwords()
+    rdrsegmenter    = load_segmenter()
+    kenMlModel      = load_kenlm()
+    detokenize      = load_detokenizer()
+    vocab           = load_vocab()
+    word2vec_model  = load_w2v()
 
 # ---
 def rank_documents_by_query(query, tf_idf, tokenizer, stopwords):
@@ -102,17 +120,27 @@ def rank_documents_by_query(query, tf_idf, tokenizer, stopwords):
     ranked = sorted(zip(article_ids, cosin_sim), key=lambda x: x[1], reverse=True)
     
     return ranked
-
-def search_articles(query):
+    
+def search_articles_enhanced(query, top_k=10):
     with st.spinner("Still loading TF-IDF data..."):
         while not df_tf_idf_future.done():
             time.sleep(0.1)  # Small wait to let spinner display
         df_tf_idf_full = df_tf_idf_future.result()
 
     with st.spinner("Searching articles..."):
-        results = rank_documents_by_query(query, df_tf_idf_full, rdrsegmenter, stopwords)
-        result_ids = results[:10]
-        result_articles = list(article_collection.find({"id": {"$in": [item[0] for item in result_ids]}}))
+        results, stats, query_tokens = rank_documents_by_query_enhanced(
+            query, df_tf_idf_full, word2vec_model, rdrsegmenter, stopwords
+        )
+        
+        # Print expansion statistics for debugging
+        print(f"Query expansion stats: {stats}")
+        print(f"Query tokens: {query_tokens}")
+        
+        result_ids = results[:top_k]
+        result_articles = list(article_collection.find({
+            "id": {"$in": [item[0] for item in result_ids]}
+        }))
+        
         return result_articles
 # ---
 
@@ -218,7 +246,7 @@ if submitted and query.strip():
                     st.success(f"🔎 You searched for: **{searchQuery}**")
 
                 print(f"Using Cosine search for query: {searchQuery}")
-                results = search_articles(searchQuery)
+                results = search_articles_enhanced(searchQuery)
 
             st.markdown("### Search Results")
             if len(results) == 0:

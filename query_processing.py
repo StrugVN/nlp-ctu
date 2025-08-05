@@ -2,7 +2,8 @@ import re
 from functools import lru_cache
 from collections import defaultdict
 from nltk.tokenize.treebank import TreebankWordDetokenizer
-import kenlm
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
 
 def remove_vn_accent(word):
     word = re.sub('[áàảãạăắằẳẵặâấầẩẫậ]', 'a', word)
@@ -94,13 +95,89 @@ def generate_progressive_suggestions(model, prefix_words, vocab, top_k=5):
 
     return [(detokenize(tokens), score) for score, tokens in suggestions]
 
+def expand_query_enhanced(token, model, topn=5, similarity_threshold=0.5):
+    expanded_tokens = [(token, 1.0)]
+    
+    if token in model.wv:
+        similar_words = model.wv.most_similar(token, topn=topn)
+        for word, similarity in similar_words:
+            if similarity > similarity_threshold:
+                clean_word = word.replace('_', ' ')
+                expanded_tokens.append((clean_word, similarity))
+    
+    return expanded_tokens
 
+def should_expand_token(token, stopwords, min_length=3):
+    if token.lower() in stopwords:
+        return False
+    if len(token) < min_length:
+        return False
+    if token.isnumeric():
+        return False
+    return True
 
-if __name__ == "__main__":
-    # Example usage
-    detokenize = TreebankWordDetokenizer().detokenize
-    sentence = "tai nan giao thong tren duong quoc lo"
-    print(needs_diacritic_restoration(sentence))
-    model = kenlm.Model("vi_model_6gramVinToken.binary")
-    result = beam_search_kenlm(sentence.lower().split(), model)
-    print("Best:", detokenize(result[0][0]))
+def rank_documents_by_query_enhanced(query, tf_idf, word_model, tokenizer, stopwords, 
+                                   base_expansion_weight=0.3, 
+                                   adaptive_expansion=True,
+                                   similarity_threshold=0.7):
+    
+    segmented = tokenizer.word_segment(query)
+    query_tokens = []
+    for sentence in segmented:
+        words = sentence.split()
+        words = [w.replace("_", " ") for w in words]
+        words = [w.lower() for w in words if w.lower() not in stopwords]
+        query_tokens.extend(words)
+    
+    if not query_tokens:
+        return []
+    
+    if adaptive_expansion:
+        if len(query_tokens) <= 2:
+            expansion_weight = base_expansion_weight * 1.5  
+        elif len(query_tokens) >= 6:
+            expansion_weight = base_expansion_weight * 0.5  
+        else:
+            expansion_weight = base_expansion_weight
+    else:
+        expansion_weight = base_expansion_weight
+    
+    word_counts = {}
+    expansion_stats = {'original_terms': 0, 'expanded_terms': 0}
+    
+    for token in query_tokens:
+        word_counts[token] = word_counts.get(token, 0) + 1.0
+        expansion_stats['original_terms'] += 1
+        
+        if should_expand_token(token, stopwords):
+            expanded_tokens = expand_query_enhanced(
+                token, word_model, 
+                topn=5, 
+                similarity_threshold=similarity_threshold
+            )
+            
+            for expanded_token, similarity in expanded_tokens[1:]: 
+                if expanded_token not in stopwords and expanded_token != token:
+                    weight = expansion_weight * similarity
+                    word_counts[expanded_token] = word_counts.get(expanded_token, 0) + weight
+                    expansion_stats['expanded_terms'] += 1
+    
+    total_weight = sum(word_counts.values())
+    if total_weight == 0:
+        return []
+    
+    word_list = tf_idf.columns.tolist()
+    col_index = {col.lower(): idx for idx, col in enumerate(word_list)}
+
+    query_vector = np.zeros(len(word_list))
+    for tok, wt in word_counts.items():
+        idx = col_index.get(tok) 
+        if idx is not None:
+            query_vector[idx] = wt / total_weight
+    
+    cosine_sim = cosine_similarity([query_vector], tf_idf.values)[0]
+    
+    article_ids = tf_idf.index.tolist()
+    ranked = sorted(zip(article_ids, cosine_sim), key=lambda x: x[1], reverse=True)
+    
+    return ranked, expansion_stats, word_counts
