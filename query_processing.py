@@ -231,7 +231,7 @@ def rank_documents_by_query_enhanced(query,
                                      similarity_threshold=0.7,
                                      ngram_max=6,
                                      max_ngrams=20):
-
+    # Annotation & subject token extraction
     annotated = tokenizer.annotate_text(query)[0]
     subject_tokens_list = [t.lower().replace(" ", "_") for t in extract_subject_tokens(annotated)]
     subject_tokens = set(subject_tokens_list)
@@ -241,12 +241,12 @@ def rank_documents_by_query_enhanced(query,
     print('\nannotated:', annotated)
     print('\nsubject_tokens:', subject_tokens_list)
     print('\ndependency_phrases:', dependency_phrases)
+    # print('\ntoken_costs:', token_costs)
 
     if not dependency_phrases:
         return []
 
     original_query_length = len(dependency_phrases)
-
     if adaptive_expansion:
         if original_query_length <= 2:
             expansion_weight = base_expansion_weight * 1.5
@@ -261,17 +261,24 @@ def rank_documents_by_query_enhanced(query,
     expansion_stats = {"original_terms": 0, "expanded_terms": 0}
 
     for phrase in dependency_phrases:
+        phrase_tokens = [t.lower().replace(" ", "_") for t in phrase]
+
+        phrase_weight = 1
+
+        print(f'\nProcessing phrase: {phrase} with weight: {phrase_weight}')
+
         expanded_phrase = []
         for token in phrase:
             token_clean = token.replace("_", " ").lower()
-            options = [(token_clean, 1.0)]
+            options = [(token_clean, phrase_weight)]
             if should_expand_token(token_clean, stopwords):
                 expanded = expand_query_enhanced(
                     token_clean, word_model, topn=5, similarity_threshold=similarity_threshold
                 )
                 for exp_token, sim in expanded[1:]:
                     if exp_token != token_clean and exp_token not in stopwords:
-                        options.append((exp_token, sim * expansion_weight))
+                        weight = sim * expansion_weight * phrase_weight
+                        options.append((exp_token, weight))
                         expansion_stats["expanded_terms"] += 1
             expanded_phrase.append(options)
             expansion_stats["original_terms"] += 1
