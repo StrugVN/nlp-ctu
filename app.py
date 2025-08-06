@@ -140,7 +140,6 @@ def search_articles_enhanced(query, top_k=10):
         id_to_article = {article["id"]: article for article in result_articles}
         sorted_articles = [id_to_article[item[0]] for item in result_ids if item[0] in id_to_article]
 
-        print(f'\nDependency groups: {groups}')
         print(f'\nTokenized query: {weights}')
 
         return sorted_articles
@@ -249,7 +248,7 @@ if submitted and query.strip():
                 else:
                     st.success(f"🔎 You searched for: **{searchQuery}**")
 
-                print(f"Using Cosine search for query: {searchQuery}")
+                print(f"\n\nUsing Cosine search for query: {searchQuery}")
                 results = search_articles_enhanced(searchQuery)
 
             st.markdown("### Search Results")

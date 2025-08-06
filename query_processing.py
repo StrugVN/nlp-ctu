@@ -6,6 +6,8 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from nltk.util import ngrams
 from itertools import product
+from collections import defaultdict
+from itertools import combinations
 
 def remove_vn_accent(word):
     word = re.sub('[áàảãạăắằẳẵặâấầẩẫậ]', 'a', word)
@@ -130,11 +132,6 @@ def filter_redundant_ngrams(word_counts, coverage_threshold=0.8):
     
     return filtered
 
-from itertools import product
-import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
-
-
 def expand_query_enhanced(token, model, topn=5, similarity_threshold=0.5):
     expanded_tokens = [(token, 1.0)]
     if token in model.wv:
@@ -150,71 +147,100 @@ def should_expand_token(token, stopwords, min_length=3):
     return not (token.lower() in stopwords or len(token) < min_length or token.isnumeric())
 
 
-def extract_dependency_chains(annotations, max_len=6):
-    graph = {}
-    index_to_token = {}
-    for entry in annotations:
-        idx = entry["index"]
-        word = entry["wordForm"]
-        head = entry["head"]
-        index_to_token[idx] = word
-        graph.setdefault(head, []).append(idx)
-
-    chains = []
-
-    def dfs(path):
-        current = path[-1]
-        if len(path) > max_len:
-            return
-        chains.append([index_to_token[i] for i in path if i in index_to_token])
-        for child in graph.get(current, []):
-            if child not in path:
-                dfs(path + [child])
-
-    for idx in sorted(index_to_token.keys()):
-        dfs([idx])
-
-    return chains
-
-
 def extract_subject_tokens(annotations):
-    subject_tokens = set()
+    """
+    Collect noun tokens from the root subtree, sorted by their sentence index.
+    """
+    subject_indices = set()
+    index_to_entry = {entry["index"]: entry for entry in annotations}
+    graph = {}
+
+    for entry in annotations:
+        graph.setdefault(entry["head"], []).append(entry["index"])
+
     root_entry = next((e for e in annotations if e["depLabel"] == "root"), None)
     if not root_entry:
-        return subject_tokens
-    root_idx = root_entry["index"]
-    subject_tokens.add(root_entry["wordForm"])
+        return []
+
+    def collect(index):
+        entry = index_to_entry.get(index)
+        if entry and entry["posTag"].startswith("N"):
+            subject_indices.add(index)
+        for child in graph.get(index, []):
+            collect(child)
+
+    collect(root_entry["index"])
+
+    # Sort indices and return corresponding wordForms
+    sorted_indices = sorted(subject_indices)
+    return [index_to_entry[i]["wordForm"] for i in sorted_indices]
+
+
+def extract_dependency_chains(annotations, subject_tokens, stopwords, max_len=6):
+    """
+    For each subject token, collect all subchains from its dependency subtree,
+    remove stopwords, and deduplicate final result.
+    """
+    index_to_entry = {entry["index"]: entry for entry in annotations}
+    token_to_index = {entry["wordForm"]: entry["index"] for entry in annotations}
+    graph = {}
+
     for entry in annotations:
-        if entry["head"] == root_idx and entry["posTag"].startswith("N"):
-            subject_tokens.add(entry["wordForm"])
-    return subject_tokens
+        graph.setdefault(entry["head"], []).append(entry["index"])
+
+    def dfs(index, visited):
+        if index in visited:
+            return
+        visited.add(index)
+        for child in graph.get(index, []):
+            dfs(child, visited)
+
+    final_chains = set()
+
+    for token in subject_tokens:
+        root_idx = token_to_index.get(token)
+        if not root_idx:
+            continue
+
+        visited = set()
+        dfs(root_idx, visited)
+        sorted_indices = sorted(visited)
+        sorted_tokens = [index_to_entry[i]["wordForm"] for i in sorted_indices]
+
+        n = len(sorted_tokens)
+        for i in range(n):
+            for j in range(i + 1, min(i + max_len, n) + 1):
+                chain = sorted_tokens[i:j]
+                # Remove stopwords
+                clean_chain = [tok for tok in chain if tok.lower() not in stopwords]
+                if clean_chain:
+                    final_chains.add(tuple(clean_chain))
+
+    return [list(chain) for chain in final_chains]
 
 
-def rank_documents_by_query_enhanced(query, 
-                                     tfidf_matrix, 
-                                     word_model, 
-                                     tokenizer, 
-                                     stopwords, 
-                                     vectorizer, 
+def rank_documents_by_query_enhanced(query,
+                                     tfidf_matrix,
+                                     word_model,
+                                     tokenizer,
+                                     stopwords,
+                                     vectorizer,
                                      article_ids,
-                                     base_expansion_weight=0.3, 
+                                     base_expansion_weight=0.3,
                                      adaptive_expansion=True,
                                      similarity_threshold=0.7,
                                      ngram_max=6,
                                      max_ngrams=20):
 
     annotated = tokenizer.annotate_text(query)[0]
-    raw_dependency_phrases = extract_dependency_chains(annotated, max_len=ngram_max)
-    subject_tokens = {t.lower().replace(" ", "_") for t in extract_subject_tokens(annotated)}
+    subject_tokens_list = [t.lower().replace(" ", "_") for t in extract_subject_tokens(annotated)]
+    subject_tokens = set(subject_tokens_list)
 
-    print('annotated:', annotated)
-    print('subject_tokens:', subject_tokens)
+    dependency_phrases = extract_dependency_chains(annotated, subject_tokens, stopwords, max_len=ngram_max)
 
-    dependency_phrases = []
-    for phrase in raw_dependency_phrases:
-        clean_phrase = [token for token in phrase if token.lower() not in stopwords]
-        if clean_phrase:
-            dependency_phrases.append(clean_phrase)
+    print('\nannotated:', annotated)
+    print('\nsubject_tokens:', subject_tokens_list)
+    print('\ndependency_phrases:', dependency_phrases)
 
     if not dependency_phrases:
         return []
@@ -240,13 +266,15 @@ def rank_documents_by_query_enhanced(query,
             token_clean = token.replace("_", " ").lower()
             options = [(token_clean, 1.0)]
             if should_expand_token(token_clean, stopwords):
-                expanded = expand_query_enhanced(token_clean, word_model, topn=5, similarity_threshold=similarity_threshold)
+                expanded = expand_query_enhanced(
+                    token_clean, word_model, topn=5, similarity_threshold=similarity_threshold
+                )
                 for exp_token, sim in expanded[1:]:
                     if exp_token != token_clean and exp_token not in stopwords:
                         options.append((exp_token, sim * expansion_weight))
-                        expansion_stats['expanded_terms'] += 1
+                        expansion_stats["expanded_terms"] += 1
             expanded_phrase.append(options)
-            expansion_stats['original_terms'] += 1
+            expansion_stats["original_terms"] += 1
 
         for combo in product(*expanded_phrase):
             tokens, weights = zip(*combo)
