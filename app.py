@@ -140,7 +140,7 @@ def search_articles_enhanced(query, top_k=10):
         id_to_article = {article["id"]: article for article in result_articles}
         sorted_articles = [id_to_article[item[0]] for item in result_ids if item[0] in id_to_article]
 
-        print(f'Tokenized query: {weights}')
+        print(f'\nTokenized query: {weights}')
 
         return sorted_articles
 
