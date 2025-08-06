@@ -115,25 +115,6 @@ def should_expand_token(token, stopwords, min_length=3):
                or token.isnumeric()
             )
 
-def calculate_ngram_coherence(tokens, word_model, fallback_score=0.3):
-    """Calculate semantic coherence between tokens in an n-gram"""
-    if len(tokens) <= 1:
-        return 1.0
-    
-    coherence_scores = []
-    for i in range(len(tokens) - 1):
-        token1, token2 = tokens[i], tokens[i+1]
-        try:
-            if token1 in word_model.wv and token2 in word_model.wv:
-                similarity = word_model.wv.similarity(token1, token2)
-                coherence_scores.append(max(similarity, 0))  # Ensure non-negative
-            else:
-                coherence_scores.append(fallback_score)
-        except:
-            coherence_scores.append(fallback_score)
-    
-    return sum(coherence_scores) / len(coherence_scores) if coherence_scores else fallback_score
-
 def filter_redundant_ngrams(word_counts, coverage_threshold=0.8):
     """Remove n-grams that are largely covered by other n-grams"""
     sorted_ngrams = sorted(word_counts.items(), key=lambda x: x[1], reverse=True)
@@ -153,53 +134,6 @@ def filter_redundant_ngrams(word_counts, coverage_threshold=0.8):
     
     return filtered
 
-def calculate_term_importance(tokens, query_tokens):
-    """Calculate importance of terms based on position and frequency in original query"""
-    importance_scores = {}
-    query_set = set(query_tokens)
-    
-    for i, token in enumerate(tokens):
-        # Position weight (earlier terms might be more important)
-        position_weight = 1.0 - (i * 0.1)  # Slight decay
-        position_weight = max(position_weight, 0.5)  # Floor at 0.5
-        
-        # Original query presence bonus
-        original_bonus = 1.5 if token in query_set else 1.0
-        
-        importance_scores[token] = position_weight * original_bonus
-    
-    return importance_scores
-
-def adaptive_ngram_weighting(gram_tokens, weights, original_query_length, coherence_score, term_importance):
-    """Calculate adaptive weight for n-grams based on multiple factors"""
-    n = len(gram_tokens)
-    
-    # Base weight from token similarities
-    avg_weight = sum(weights) / len(weights)
-    
-    # Length scaling with optimal range around 2-3 grams
-    if n == 1:
-        length_factor = 0.7  # Single terms are less specific
-    elif n == 2:
-        length_factor = 1.0  # Bigrams are often optimal
-    elif n == 3:
-        length_factor = 0.9  # Trigrams can be good but slightly penalized
-    else:
-        length_factor = 0.6 * (0.8 ** (n - 3))  # Exponential decay for longer n-grams
-    
-    # Coverage factor (how much of original query this represents)
-    coverage_factor = min(n / original_query_length, 1.0) ** 0.3
-    
-    # Term importance factor
-    importance_factor = sum(term_importance.get(token, 0.5) for token in gram_tokens) / len(gram_tokens)
-    
-    # Coherence factor (semantic relatedness)
-    coherence_factor = coherence_score ** 0.5  # Square root to avoid over-penalization
-    
-    final_weight = avg_weight * length_factor * coverage_factor * importance_factor * coherence_factor
-    
-    return final_weight
-
 def rank_documents_by_query_enhanced(query, 
                                      tfidf_matrix, 
                                      word_model, 
@@ -212,7 +146,7 @@ def rank_documents_by_query_enhanced(query,
                                      similarity_threshold=0.7,
                                      ngram_max=3,
                                      max_ngrams=20,  # New parameter to limit n-grams
-                                     coherence_threshold=0.2):  # New parameter for coherence filtering
+                                    ):
     
     # Step 1: Tokenize and clean query
     segmented = tokenizer.word_segment(query)
@@ -227,9 +161,6 @@ def rank_documents_by_query_enhanced(query,
         return []
 
     original_query_length = len(query_tokens)
-
-    # Step 2: Calculate term importance
-    term_importance = calculate_term_importance(query_tokens, query_tokens)
 
     # Step 3: Adjust expansion weight
     if adaptive_expansion:
@@ -267,26 +198,17 @@ def rank_documents_by_query_enhanced(query,
             for gram_tuple in product(*options_slice):
                 tokens, weights = zip(*gram_tuple)
                 
-                # Calculate coherence for multi-token n-grams
-                if n > 1:
-                    coherence_score = calculate_ngram_coherence(tokens, word_model)
-                    if coherence_score < coherence_threshold:
-                        continue  # Skip incoherent n-grams
-                else:
-                    coherence_score = 1.0
                 
                 tokens_clean = [t.replace(" ", "_") for t in tokens]
                 gram = " ".join(tokens_clean)
 
                 # Use enhanced weighting
-                final_weight = adaptive_ngram_weighting(
-                    tokens, weights, original_query_length, coherence_score, term_importance
-                )
+                length_scaling = (n / original_query_length) ** 0.5
+                final_weight = length_scaling * sum(weights) / len(weights)
 
                 word_counts[gram] = word_counts.get(gram, 0) + final_weight
                 ngram_details[gram] = {
                     'length': n,
-                    'coherence': coherence_score,
                     'tokens': tokens
                 }
 
@@ -320,7 +242,6 @@ def rank_documents_by_query_enhanced(query,
     enhanced_stats = {
         **expansion_stats,
         'final_ngrams': len(word_counts),
-        'avg_coherence': sum(ngram_details[gram]['coherence'] for gram in word_counts) / len(word_counts) if word_counts else 0
     }
 
     return ranked, enhanced_stats, word_counts
