@@ -56,7 +56,7 @@ def load_stopwords():
 def load_segmenter():
     original_cwd = os.getcwd()
     try:
-        segmenter = py_vncorenlp.VnCoreNLP(annotators=["wseg"], save_dir=os.path.join(original_cwd, "vncorenlp"))
+        segmenter = py_vncorenlp.VnCoreNLP(annotators=["wseg", "pos", "ner", "parse"], save_dir=os.path.join(original_cwd, "vncorenlp"))
         os.chdir(original_cwd)
         print("VnCoreNLP segmenter initialized successfully.")
         return segmenter
@@ -120,7 +120,7 @@ def search_articles_enhanced(query, top_k=10):
     #     df_tf_idf_full = df_tf_idf_future.result()
 
     with st.spinner("Searching articles..."):
-        results, stats, weights = rank_documents_by_query_enhanced(
+        results, stats, weights, groups = rank_documents_by_query_enhanced(
             query=query,
             tfidf_matrix=tfidf_matrix,
             word_model=word2vec_model,
@@ -140,6 +140,7 @@ def search_articles_enhanced(query, top_k=10):
         id_to_article = {article["id"]: article for article in result_articles}
         sorted_articles = [id_to_article[item[0]] for item in result_ids if item[0] in id_to_article]
 
+        print(f'\nDependency groups: {groups}')
         print(f'\nTokenized query: {weights}')
 
         return sorted_articles

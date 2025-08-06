@@ -99,21 +99,17 @@ def generate_progressive_suggestions(model, prefix_words, vocab, top_k=5):
 
 def expand_query_enhanced(token, model, topn=5, similarity_threshold=0.5):
     expanded_tokens = [(token, 1.0)]
-    
     if token in model.wv:
         similar_words = model.wv.most_similar(token, topn=topn)
         for word, similarity in similar_words:
             if similarity > similarity_threshold:
                 clean_word = word.replace('_', ' ')
                 expanded_tokens.append((clean_word, similarity))
-    
     return expanded_tokens
 
+
 def should_expand_token(token, stopwords, min_length=3):
-    return not(token.lower() in stopwords 
-               or len(token) < min_length 
-               or token.isnumeric()
-            )
+    return not (token.lower() in stopwords or len(token) < min_length or token.isnumeric())
 
 def filter_redundant_ngrams(word_counts, coverage_threshold=0.8):
     """Remove n-grams that are largely covered by other n-grams"""
@@ -134,6 +130,66 @@ def filter_redundant_ngrams(word_counts, coverage_threshold=0.8):
     
     return filtered
 
+from itertools import product
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+
+
+def expand_query_enhanced(token, model, topn=5, similarity_threshold=0.5):
+    expanded_tokens = [(token, 1.0)]
+    if token in model.wv:
+        similar_words = model.wv.most_similar(token, topn=topn)
+        for word, similarity in similar_words:
+            if similarity > similarity_threshold:
+                clean_word = word.replace('_', ' ')
+                expanded_tokens.append((clean_word, similarity))
+    return expanded_tokens
+
+
+def should_expand_token(token, stopwords, min_length=3):
+    return not (token.lower() in stopwords or len(token) < min_length or token.isnumeric())
+
+
+def extract_dependency_chains(annotations, max_len=6):
+    graph = {}
+    index_to_token = {}
+    for entry in annotations:
+        idx = entry["index"]
+        word = entry["wordForm"]
+        head = entry["head"]
+        index_to_token[idx] = word
+        graph.setdefault(head, []).append(idx)
+
+    chains = []
+
+    def dfs(path):
+        current = path[-1]
+        if len(path) > max_len:
+            return
+        chains.append([index_to_token[i] for i in path if i in index_to_token])
+        for child in graph.get(current, []):
+            if child not in path:
+                dfs(path + [child])
+
+    for idx in sorted(index_to_token.keys()):
+        dfs([idx])
+
+    return chains
+
+
+def extract_subject_tokens(annotations):
+    subject_tokens = set()
+    root_entry = next((e for e in annotations if e["depLabel"] == "root"), None)
+    if not root_entry:
+        return subject_tokens
+    root_idx = root_entry["index"]
+    subject_tokens.add(root_entry["wordForm"])
+    for entry in annotations:
+        if entry["head"] == root_idx and entry["posTag"].startswith("N"):
+            subject_tokens.add(entry["wordForm"])
+    return subject_tokens
+
+
 def rank_documents_by_query_enhanced(query, 
                                      tfidf_matrix, 
                                      word_model, 
@@ -144,87 +200,72 @@ def rank_documents_by_query_enhanced(query,
                                      base_expansion_weight=0.3, 
                                      adaptive_expansion=True,
                                      similarity_threshold=0.7,
-                                     ngram_max=3,
-                                     max_ngrams=20,  # New parameter to limit n-grams
-                                    ):
-    
-    # Step 1: Tokenize and clean query
-    segmented = tokenizer.word_segment(query)
-    query_tokens = []
-    for sentence in segmented:
-        words = sentence.split()
-        words = [w.replace("_", " ") for w in words]
-        words = [w.lower() for w in words if w.lower() not in stopwords]
-        query_tokens.extend(words)
+                                     ngram_max=6,
+                                     max_ngrams=20):
 
-    if not query_tokens:
+    annotated = tokenizer.annotate_text(query)[0]
+    raw_dependency_phrases = extract_dependency_chains(annotated, max_len=ngram_max)
+    subject_tokens = {t.lower().replace(" ", "_") for t in extract_subject_tokens(annotated)}
+
+    print('annotated:', annotated)
+    print('subject_tokens:', subject_tokens)
+
+    dependency_phrases = []
+    for phrase in raw_dependency_phrases:
+        clean_phrase = [token for token in phrase if token.lower() not in stopwords]
+        if clean_phrase:
+            dependency_phrases.append(clean_phrase)
+
+    if not dependency_phrases:
         return []
 
-    original_query_length = len(query_tokens)
+    original_query_length = len(dependency_phrases)
 
-    # Step 3: Adjust expansion weight
     if adaptive_expansion:
-        if len(query_tokens) <= 2:
+        if original_query_length <= 2:
             expansion_weight = base_expansion_weight * 1.5
-        elif len(query_tokens) >= 6:
+        elif original_query_length >= 6:
             expansion_weight = base_expansion_weight * 0.5
         else:
             expansion_weight = base_expansion_weight
     else:
         expansion_weight = base_expansion_weight
 
-    # Step 4: Expand tokens
-    token_options = []
-    expansion_stats = {'original_terms': len(query_tokens), 'expanded_terms': 0}
-
-    for token in query_tokens:
-        options = [(token, 1.0)]  # original token
-        if should_expand_token(token, stopwords):
-            expanded = expand_query_enhanced(token, word_model, topn=5, similarity_threshold=similarity_threshold)
-            for exp_token, sim in expanded[1:]:  # skip the original itself
-                if exp_token != token and exp_token not in stopwords:
-                    weight = sim * expansion_weight
-                    options.append((exp_token, weight))
-                    expansion_stats['expanded_terms'] += 1
-        token_options.append(options)
-
-    # Step 5: Generate and weight n-grams with enhanced scoring
     word_counts = {}
-    ngram_details = {}  # Store additional info for debugging
+    expansion_stats = {"original_terms": 0, "expanded_terms": 0}
 
-    for n in range(1, ngram_max + 1):
-        for i in range(len(token_options) - n + 1):
-            options_slice = token_options[i:i + n]
-            for gram_tuple in product(*options_slice):
-                tokens, weights = zip(*gram_tuple)
-                
-                
-                tokens_clean = [t.replace(" ", "_") for t in tokens]
-                gram = " ".join(tokens_clean)
+    for phrase in dependency_phrases:
+        expanded_phrase = []
+        for token in phrase:
+            token_clean = token.replace("_", " ").lower()
+            options = [(token_clean, 1.0)]
+            if should_expand_token(token_clean, stopwords):
+                expanded = expand_query_enhanced(token_clean, word_model, topn=5, similarity_threshold=similarity_threshold)
+                for exp_token, sim in expanded[1:]:
+                    if exp_token != token_clean and exp_token not in stopwords:
+                        options.append((exp_token, sim * expansion_weight))
+                        expansion_stats['expanded_terms'] += 1
+            expanded_phrase.append(options)
+            expansion_stats['original_terms'] += 1
 
-                # Use enhanced weighting
-                length_scaling = (n / original_query_length) ** 0.5
-                final_weight = length_scaling * sum(weights) / len(weights)
+        for combo in product(*expanded_phrase):
+            tokens, weights = zip(*combo)
+            tokens_clean = [t.replace(" ", "_") for t in tokens]
+            gram = " ".join(tokens_clean)
 
-                word_counts[gram] = word_counts.get(gram, 0) + final_weight
-                ngram_details[gram] = {
-                    'length': n,
-                    'tokens': tokens
-                }
+            if not any(subj in gram for subj in subject_tokens):
+                continue
 
-    # Step 6: Filter redundant n-grams
-    word_counts = filter_redundant_ngrams(word_counts)
-    
-    # Step 7: Keep only top n-grams to reduce noise
+            weight = sum(weights) / len(weights)
+            word_counts[gram] = word_counts.get(gram, 0) + weight
+
     if len(word_counts) > max_ngrams:
-        top_ngrams = sorted(word_counts.items(), key=lambda x: x[1], reverse=True)[:max_ngrams]
-        word_counts = dict(top_ngrams)
+        word_counts = dict(sorted(word_counts.items(), key=lambda x: x[1], reverse=True)[:max_ngrams])
 
     total_weight = sum(word_counts.values())
     if total_weight == 0:
         return []
 
-    # Step 8: Build query vector
     feature_names = vectorizer.get_feature_names_out().tolist()
     col_index = {term.lower(): idx for idx, term in enumerate(feature_names)}
     query_vector = np.zeros(len(feature_names))
@@ -232,17 +273,9 @@ def rank_documents_by_query_enhanced(query,
     for token, weight in word_counts.items():
         idx = col_index.get(token)
         if idx is not None:
-            query_vector[idx] = weight / total_weight  # normalized weight
+            query_vector[idx] = weight / total_weight
 
-    # Step 9: Cosine similarity
     cosine_sim = cosine_similarity([query_vector], tfidf_matrix)[0]
     ranked = sorted(zip(article_ids, cosine_sim), key=lambda x: x[1], reverse=True)
 
-    # Enhanced stats for debugging
-    enhanced_stats = {
-        **expansion_stats,
-        'final_ngrams': len(word_counts),
-    }
-
-    return ranked, enhanced_stats, word_counts
-
+    return ranked, expansion_stats, word_counts, dependency_phrases
