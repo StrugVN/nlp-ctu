@@ -1,5 +1,6 @@
 import os
 import time
+import joblib
 from nltk.tokenize.treebank import TreebankWordDetokenizer
 import streamlit as st
 st.set_page_config(page_title="Search UI", layout="wide")
@@ -14,6 +15,7 @@ import kenlm
 from query_processing import beam_search_kenlm, load_vocab_from_file, rank_documents_by_query_enhanced, generate_progressive_suggestions
 from gensim.models import Word2Vec
 import re
+import joblib
 
 load_dotenv()
 
@@ -63,10 +65,10 @@ def load_segmenter():
         raise e
 
 # Load TF-IDF in background
-start_df_load = "df_tf_idf_future" in st.session_state
-if not start_df_load:
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    df_tf_idf_future = executor.submit(load_tf_idf)
+# start_df_load = "df_tf_idf_future" in st.session_state
+# if not start_df_load:
+#     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+#     df_tf_idf_future = executor.submit(load_tf_idf)
 
 @st.cache_resource
 def load_kenlm():
@@ -84,6 +86,18 @@ def load_vocab():
 def load_w2v():
     return Word2Vec.load("word2vec_vi_bao_st.model")
 
+@st.cache_resource
+def load_vectorizer():
+    return joblib.load('tfidf_vectorizer.joblib')
+
+@st.cache_resource
+def load_tfidf_matrix():
+    return joblib.load('tfidf_matrix.joblib')
+
+@st.cache_resource
+def load_article_ids():
+    return pd.read_csv('article_ids.csv')['id'].values
+
 with st.spinner("Loading resources..."):
     stopwords       = load_stopwords()
     rdrsegmenter    = load_segmenter()
@@ -91,97 +105,44 @@ with st.spinner("Loading resources..."):
     detokenize      = load_detokenizer()
     vocab           = load_vocab()
     word2vec_model  = load_w2v()
+    vectorizer      = load_vectorizer()
+    tfidf_matrix    = load_tfidf_matrix()
+    article_ids     = load_article_ids()
+    print("All resources loaded successfully.")
+    print(len(vectorizer.get_feature_names_out().tolist()), "features in vectorizer")
 
-# ---
-def rank_documents_by_query(query, tf_idf, tokenizer, stopwords):
-    segmented = tokenizer.word_segment(query)
-    query_tokens = []
-    for sentence in segmented:
-        words = sentence.split()
-        words = [w.replace("_", " ") for w in words]
-        words = [w.lower() for w in words if w.lower() not in stopwords]
-        query_tokens.extend(words)
 
-    word_list = tf_idf.columns
-    query_vector = np.zeros(len(word_list))
-
-    word_counts = {word: query_tokens.count(word) for word in set(query_tokens)}
-
-    total_terms = sum(word_counts.values())
-    if total_terms == 0:
-        return []
-
-    for i, term in enumerate(word_list):
-        if term in word_counts:
-            query_vector[i] = word_counts[term] / total_terms 
-
-    cosin_sim = cosine_similarity([query_vector], tf_idf.values)[0]
-
-    article_ids = tf_idf.index.tolist()
-    ranked = sorted(zip(article_ids, cosin_sim), key=lambda x: x[1], reverse=True)
-    
-    return ranked
-    
+# --- Search Articles ---
 def search_articles_enhanced(query, top_k=10):
-    with st.spinner("Still loading TF-IDF data..."):
-        while not df_tf_idf_future.done():
-            time.sleep(0.1)  # Small wait to let spinner display
-        df_tf_idf_full = df_tf_idf_future.result()
+    # with st.spinner("Still loading TF-IDF data..."):
+    #     while not df_tf_idf_future.done():
+    #         time.sleep(0.1)  # Small wait to let spinner display
+    #     df_tf_idf_full = df_tf_idf_future.result()
 
     with st.spinner("Searching articles..."):
-        results, stats, query_tokens = rank_documents_by_query_enhanced(
-            query, df_tf_idf_full, word2vec_model, rdrsegmenter, stopwords
+        results, stats, weights = rank_documents_by_query_enhanced(
+            query=query,
+            tfidf_matrix=tfidf_matrix,
+            word_model=word2vec_model,
+            tokenizer=rdrsegmenter,
+            stopwords=stopwords,
+            vectorizer=vectorizer,
+            article_ids=article_ids,
+            ngram_max=6,
         )
-        
-        # Print expansion statistics for debugging
-        print(f"Query expansion stats: {stats}")
-        print(f"Query tokens: {query_tokens}")
+
         
         result_ids = results[:top_k]
         result_articles = list(article_collection.find({
             "id": {"$in": [item[0] for item in result_ids]}
         }))
         
-        return result_articles
+        id_to_article = {article["id"]: article for article in result_articles}
+        sorted_articles = [id_to_article[item[0]] for item in result_ids if item[0] in id_to_article]
 
-import re
+        print(f'Tokenized query: {weights}')
 
-def generate_snippets(text: str,
-                      query: str,
-                      max_words: int = 150,
-                      num_snippets: int = 2,
-                      context_words: int = 10):
-    # 1) take the first N words
-    words = text.split()
-    first = ' '.join(words[:max_words])
-    snippet_list = [ first ]
-
-    # compile our highlight‐pattern
-    pattern = re.compile(re.escape(query), re.IGNORECASE)
-
-    # 2) for each match grab its surrounding words
-    word_list = text.split()
-    # build cumulative char counts to map char→word index
-    cum = []
-    total = 0
-    for w in word_list:
-        total += len(w) + 1
-        cum.append(total)
-
-    for match in pattern.finditer(text):
-        # find which word index contains match.start()
-        idx = next(i for i,c in enumerate(cum) if c > match.start())
-        start = max(0, idx - context_words)
-        end   = min(len(word_list), idx + context_words + 1)
-        snippet = ' '.join(word_list[start:end])
-        snippet_list.append(snippet)
-        if len(snippet_list) >= num_snippets + 1:
-            break
-
-    # 3) stitch them together with ellipses, and highlight
-    stitched = ' … '.join(snippet_list)
-    highlighted = pattern.sub(r"<mark>\g<0></mark>", stitched)
-    return f"… {highlighted} …"
+        return sorted_articles
 
 # ---
 
@@ -307,13 +268,7 @@ if submitted and query.strip():
                                 <a href="{page_url}" style="text-decoration: none; color: black;" target="_blank">{r['title']}</a>
                             </h3>
                         """, unsafe_allow_html=True)
-                        snips = generate_snippets(r['content'], searchQuery)
-
-                        snips_html = generate_snippets(r['content'], searchQuery)
-                        st.markdown(
-                            f"<p style='margin-top:2px; display:inline'>{snips_html}</p>",
-                            unsafe_allow_html=True
-                        )
+                        st.markdown(f"<p style='margin-top: 2px'>{r['content'][:500]}...</p>", unsafe_allow_html=True)
                     st.markdown("<hr style='margin: 20px 0;'>", unsafe_allow_html=True)
 
         finally:

@@ -4,6 +4,8 @@ from collections import defaultdict
 from nltk.tokenize.treebank import TreebankWordDetokenizer
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
+from nltk.util import ngrams
+from itertools import product
 
 def remove_vn_accent(word):
     word = re.sub('[áàảãạăắằẳẵặâấầẩẫậ]', 'a', word)
@@ -116,11 +118,18 @@ def should_expand_token(token, stopwords, min_length=3):
         return False
     return True
 
-def rank_documents_by_query_enhanced(query, tf_idf, word_model, tokenizer, stopwords, 
-                                   base_expansion_weight=0.3, 
-                                   adaptive_expansion=True,
-                                   similarity_threshold=0.7):
-    
+def rank_documents_by_query_enhanced(query, 
+                                     tfidf_matrix, 
+                                     word_model, 
+                                     tokenizer, 
+                                     stopwords, 
+                                     vectorizer, 
+                                     article_ids,
+                                     base_expansion_weight=0.3, 
+                                     adaptive_expansion=True,
+                                     similarity_threshold=0.7,
+                                     ngram_max=3):
+    # Step 1: Tokenize and clean query
     segmented = tokenizer.word_segment(query)
     query_tokens = []
     for sentence in segmented:
@@ -128,56 +137,66 @@ def rank_documents_by_query_enhanced(query, tf_idf, word_model, tokenizer, stopw
         words = [w.replace("_", " ") for w in words]
         words = [w.lower() for w in words if w.lower() not in stopwords]
         query_tokens.extend(words)
-    
+
     if not query_tokens:
         return []
-    
+
+    # Step 2: Adjust expansion weight
     if adaptive_expansion:
         if len(query_tokens) <= 2:
-            expansion_weight = base_expansion_weight * 1.5  
+            expansion_weight = base_expansion_weight * 1.5
         elif len(query_tokens) >= 6:
-            expansion_weight = base_expansion_weight * 0.5  
+            expansion_weight = base_expansion_weight * 0.5
         else:
             expansion_weight = base_expansion_weight
     else:
         expansion_weight = base_expansion_weight
-    
-    word_counts = {}
-    expansion_stats = {'original_terms': 0, 'expanded_terms': 0}
-    
+
+    # Step 3: Expand tokens
+    token_options = []
+    expansion_stats = {'original_terms': len(query_tokens), 'expanded_terms': 0}
+
     for token in query_tokens:
-        word_counts[token] = word_counts.get(token, 0) + 1.0
-        expansion_stats['original_terms'] += 1
-        
+        options = [(token, 1.0)]  # original token
         if should_expand_token(token, stopwords):
-            expanded_tokens = expand_query_enhanced(
-                token, word_model, 
-                topn=5, 
-                similarity_threshold=similarity_threshold
-            )
-            
-            for expanded_token, similarity in expanded_tokens[1:]: 
-                if expanded_token not in stopwords and expanded_token != token:
-                    weight = expansion_weight * similarity
-                    word_counts[expanded_token] = word_counts.get(expanded_token, 0) + weight
+            expanded = expand_query_enhanced(token, word_model, topn=5, similarity_threshold=similarity_threshold)
+            for exp_token, sim in expanded[1:]:  # skip the original itself
+                if exp_token != token and exp_token not in stopwords:
+                    weight = sim * expansion_weight
+                    options.append((exp_token, weight))
                     expansion_stats['expanded_terms'] += 1
-    
+        token_options.append(options)
+
+    # Step 4: Generate ngrams (1, 2, 3) from expanded options
+    word_counts = {}
+
+    for n in range(1, ngram_max + 1):
+        for i in range(len(token_options) - n + 1):
+            options_slice = token_options[i:i + n]
+            for gram_tuple in product(*options_slice):
+                tokens, weights = zip(*gram_tuple)
+                tokens_clean = [t.replace(" ", "_") for t in tokens]
+                gram = " ".join(tokens_clean)
+                weight = sum(weights) / len(weights)  # you can use product(weights) if you prefer
+                word_counts[gram] = word_counts.get(gram, 0) + weight
+
     total_weight = sum(word_counts.values())
     if total_weight == 0:
         return []
-    
-    word_list = tf_idf.columns.tolist()
-    col_index = {col.lower(): idx for idx, col in enumerate(word_list)}
 
-    query_vector = np.zeros(len(word_list))
-    for tok, wt in word_counts.items():
-        idx = col_index.get(tok) 
+    # Step 5: Build query vector
+    feature_names = vectorizer.get_feature_names_out().tolist()
+    col_index = {term.lower(): idx for idx, term in enumerate(feature_names)}
+    query_vector = np.zeros(len(feature_names))
+
+    for token, weight in word_counts.items():
+        idx = col_index.get(token)
         if idx is not None:
-            query_vector[idx] = wt / total_weight
-    
-    cosine_sim = cosine_similarity([query_vector], tf_idf.values)[0]
-    
-    article_ids = tf_idf.index.tolist()
+            query_vector[idx] = weight / total_weight  # normalized weight
+
+    # Step 6: Cosine similarity
+    cosine_sim = cosine_similarity([query_vector], tfidf_matrix)[0]
     ranked = sorted(zip(article_ids, cosine_sim), key=lambda x: x[1], reverse=True)
-    
+
     return ranked, expansion_stats, word_counts
+
