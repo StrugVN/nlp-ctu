@@ -8,6 +8,7 @@ from nltk.util import ngrams
 from itertools import product
 from collections import defaultdict
 from itertools import combinations
+import torch
 
 def remove_vn_accent(word):
     word = re.sub('[áàảãạăắằẳẵặâấầẩẫậ]', 'a', word)
@@ -218,6 +219,22 @@ def extract_dependency_chains(annotations, subject_tokens, stopwords, max_len=6)
 
     return [list(chain) for chain in final_chains]
 
+def encode_sentence(sentence, model, tokenizer):
+    inputs = tokenizer(sentence, return_tensors="pt", truncation=True, padding=True)
+    
+    with torch.no_grad():
+        outputs = model(**inputs)
+
+    cls_embedding = outputs.last_hidden_state[:, 0, :]
+    return cls_embedding
+
+
+def similarity_viBERT(sent1, sent2, model, tokenizer):
+    vec1 = encode_sentence(sent1, model, tokenizer).numpy() 
+    vec2 = encode_sentence(sent2, model, tokenizer).numpy()
+    
+    sim = cosine_similarity(vec1, vec2)[0][0]
+    return sim
 
 def rank_documents_by_query_enhanced(query,
                                      tfidf_matrix,
@@ -230,18 +247,35 @@ def rank_documents_by_query_enhanced(query,
                                      adaptive_expansion=True,
                                      similarity_threshold=0.7,
                                      ngram_max=6,
-                                     max_ngrams=20):
+                                     max_ngrams=20,
+                                     bert_model=None,
+                                     bert_tokenizer=None,
+                                     kenlm_model=None
+                                     ):
     # Annotation & subject token extraction
-    annotated = tokenizer.annotate_text(query)[0]
-    subject_tokens_list = [t.lower().replace(" ", "_") for t in extract_subject_tokens(annotated)]
-    subject_tokens = set(subject_tokens_list)
+    segmented = tokenizer.word_segment(query)[0]
 
-    dependency_phrases = extract_dependency_chains(annotated, subject_tokens, stopwords, max_len=ngram_max)
+    print(f'\nSegmented query: {segmented}')
+
+    query_tokens = []
+    for token in segmented.split(' '):
+        print(f'Processing token: {token}')
+        if token.replace("_", " ").lower() not in stopwords and len(token) > 1:
+            print('Y')
+            query_tokens.append(token)
+
+    annotated = tokenizer.annotate_text(query)[0]
+
+    # subject_tokens_list = [t.lower().replace(" ", "_") for t in extract_subject_tokens(annotated)]
+    # subject_tokens = set(subject_tokens_list)
+
+    query_tokens_str = " ".join(query_tokens).replace("_", " ")
+
+    dependency_phrases = extract_dependency_chains(annotated, query_tokens, stopwords, max_len=ngram_max)
 
     print('\nannotated:', annotated)
-    print('\nsubject_tokens:', subject_tokens_list)
+    print('\nsubject_tokens:', query_tokens) ####
     print('\ndependency_phrases:', dependency_phrases)
-    # print('\ntoken_costs:', token_costs)
 
     if not dependency_phrases:
         return []
@@ -259,18 +293,26 @@ def rank_documents_by_query_enhanced(query,
 
     word_counts = {}
     expansion_stats = {"original_terms": 0, "expanded_terms": 0}
+    phrase_weights = {}  
 
     for phrase in dependency_phrases:
-        phrase_tokens = [t.lower().replace(" ", "_") for t in phrase]
+        phrase_weight = 1.0
 
-        phrase_weight = 1
+        if bert_model and bert_tokenizer:
+            phrase_str = " ".join(phrase).replace("_", " ")
+            phrase_weight = similarity_viBERT(query_tokens_str, phrase_str, bert_model, bert_tokenizer)**0.5
+        else:
+            print("BERT model or tokenizer not provided, using default weight of 1.0 for phrases.")
 
-        print(f'\nProcessing phrase: {phrase} with weight: {phrase_weight}')
+        phrase_key = " ".join(phrase)
+        phrase_weights[phrase_key] = phrase_weight
+        
+        print(f'Processing phrase: {phrase} with weight: {phrase_weight:.4f}')
 
         expanded_phrase = []
         for token in phrase:
             token_clean = token.replace("_", " ").lower()
-            options = [(token_clean, phrase_weight)]
+            options = [(token_clean, phrase_weight)]            
             if should_expand_token(token_clean, stopwords):
                 expanded = expand_query_enhanced(
                     token_clean, word_model, topn=5, similarity_threshold=similarity_threshold
@@ -288,7 +330,7 @@ def rank_documents_by_query_enhanced(query,
             tokens_clean = [t.replace(" ", "_") for t in tokens]
             gram = " ".join(tokens_clean)
 
-            if not any(subj in gram for subj in subject_tokens):
+            if not any(subj in gram for subj in query_tokens):
                 continue
 
             weight = sum(weights) / len(weights)
@@ -313,4 +355,9 @@ def rank_documents_by_query_enhanced(query,
     cosine_sim = cosine_similarity([query_vector], tfidf_matrix)[0]
     ranked = sorted(zip(article_ids, cosine_sim), key=lambda x: x[1], reverse=True)
 
-    return ranked, expansion_stats, word_counts, dependency_phrases
+    normalized_vocab = [w.replace(" ", "_") for w in word_model.wv.key_to_index]
+
+    print(f'\nTest test: ', query_tokens)
+    print(f'\nTest test: ', generate_progressive_suggestions(kenlm_model, query_tokens, normalized_vocab, top_k=5))
+
+    return ranked, phrase_weights, word_counts, dependency_phrases

@@ -12,10 +12,13 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 import concurrent.futures
 import kenlm
-from query_processing import beam_search_kenlm, load_vocab_from_file, rank_documents_by_query_enhanced, generate_progressive_suggestions
+from query_processing import beam_search_kenlm, load_vocab_from_file, rank_documents_by_query_enhanced, generate_progressive_suggestions, similarity_viBERT
 from gensim.models import Word2Vec
 import re
 import joblib
+from transformers import AutoTokenizer, AutoModel
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="torch.nn.modules.module")
 
 load_dotenv()
 
@@ -98,6 +101,14 @@ def load_tfidf_matrix():
 def load_article_ids():
     return pd.read_csv('article_ids.csv')['id'].values
 
+@st.cache_resource
+def load_vibert_model():
+    return AutoModel.from_pretrained("vinai/phobert-base", torch_dtype="auto", cache_dir="./transformers_cache")
+
+@st.cache_resource
+def load_vibert_tokenizer():
+    return AutoTokenizer.from_pretrained("vinai/phobert-base", cache_dir="./transformers_cache")
+
 with st.spinner("Loading resources..."):
     stopwords       = load_stopwords()
     rdrsegmenter    = load_segmenter()
@@ -108,8 +119,9 @@ with st.spinner("Loading resources..."):
     vectorizer      = load_vectorizer()
     tfidf_matrix    = load_tfidf_matrix()
     article_ids     = load_article_ids()
+    vibert_model    = load_vibert_model()
+    vibert_tokenizer = load_vibert_tokenizer()
     print("All resources loaded successfully.")
-    print(len(vectorizer.get_feature_names_out().tolist()), "features in vectorizer")
 
 
 # --- Search Articles ---
@@ -129,6 +141,9 @@ def search_articles_enhanced(query, top_k=10):
             vectorizer=vectorizer,
             article_ids=article_ids,
             ngram_max=6,
+            bert_model=vibert_model,
+            bert_tokenizer=vibert_tokenizer,
+            kenlm_model=kenMlModel,
         )
 
         

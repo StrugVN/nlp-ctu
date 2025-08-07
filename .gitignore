@@ -201,3 +201,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+transformers_cache/
+train_corpus_vinAI.txt
+vi_model_6gramVinToken.binary
