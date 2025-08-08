@@ -12,11 +12,13 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 import concurrent.futures
 import kenlm
-from query_processing import beam_search_kenlm, load_vocab_from_file, rank_documents_by_query_enhanced, generate_progressive_suggestions, similarity_viBERT
+from query_processing import beam_search_kenlm, load_vocab_from_file, rank_documents_by_query_enhanced, similarity_viBERT
 from gensim.models import Word2Vec
 import re
 import joblib
 from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning, module="torch.nn.modules.module")
 
@@ -109,6 +111,14 @@ def load_vibert_model():
 def load_vibert_tokenizer():
     return AutoTokenizer.from_pretrained("vinai/phobert-base", cache_dir="./transformers_cache")
 
+@st.cache_resource
+def load_gpt2_tokenizer():
+    return AutoTokenizer.from_pretrained(r"gpt2-vietnamese-finetuned\final")
+
+@st.cache_resource
+def load_gpt2_model():
+    return AutoModelForCausalLM.from_pretrained(r"gpt2-vietnamese-finetuned\final")
+
 with st.spinner("Loading resources..."):
     stopwords       = load_stopwords()
     rdrsegmenter    = load_segmenter()
@@ -121,6 +131,8 @@ with st.spinner("Loading resources..."):
     article_ids     = load_article_ids()
     vibert_model    = load_vibert_model()
     vibert_tokenizer = load_vibert_tokenizer()
+    tokenizer_gpt_vi = load_gpt2_tokenizer()
+    model_gpt_vi = load_gpt2_model()
     print("All resources loaded successfully.")
 
 
@@ -144,6 +156,8 @@ def search_articles_enhanced(query, top_k=10):
             bert_model=vibert_model,
             bert_tokenizer=vibert_tokenizer,
             kenlm_model=kenMlModel,
+            generative_model=model_gpt_vi,
+            generative_tokenizer=tokenizer_gpt_vi
         )
 
         

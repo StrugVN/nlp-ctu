@@ -205,3 +205,4 @@ __marimo__/
 transformers_cache/
 train_corpus_vinAI.txt
 vi_model_6gramVinToken.binary
+gpt2-vietnamese-finetuned/

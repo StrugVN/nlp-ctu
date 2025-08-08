@@ -72,33 +72,42 @@ def load_vocab_from_file(path='vietDict.txt'):
         return [w.strip() for w in f if w.strip() and w.strip() not in ('<s>', '</s>', '<unk>')]
 
 
-def generate_progressive_suggestions(model, prefix_words, vocab, top_k=5):
-    """
-    Generate top-k suggestions with increasing length (each suggestion longer than the previous by 1 token).
-    """
-    from heapq import nlargest
-    detokenize = TreebankWordDetokenizer().detokenize
+def generate_vietnamese_sentences(prompt, model, tokenizer, rdrsegmenter, device='cpu',  do_sample=True, top_p=0.9, top_k=50, temperature=0.8):
+    prompt = prompt.strip()
+    
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
 
-    suggestions = []
-    current_beam = [(0.0, prefix_words[:])]  
+    max_new_tokens = prompt.count(' ') * 2
 
-    for target_len in range(len(prefix_words) + 1, len(prefix_words) + top_k + 1):
-        next_beam = []
-        for score, tokens in current_beam:
-            for word in vocab:
-                full_seq = tokens + [word]
-                full_str = " ".join(full_seq[-3:])  
-                new_score = score + model.score(full_str, bos=False, eos=False)
-                next_beam.append((new_score, full_seq))
+    with torch.no_grad():
+        output_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=do_sample,
+            top_p=top_p,
+            top_k=top_k,
+            temperature=temperature,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            num_return_sequences=10
+        )
 
-        best = nlargest(1, [s for s in next_beam if len(s[1]) == target_len], key=lambda x: x[0])
-        if best:
-            suggestions.append(best[0])
-            current_beam = best
-        else:
-            break 
+    prompt_segmented = rdrsegmenter.word_segment(prompt)[0].split()
+    result = []
+    for output_id in output_ids:
+        output_text = tokenizer.decode(output_id, skip_special_tokens=True)
+        output_text = re.sub(r'\s+', ' ', output_text).strip()
+        
+        segmented_text = rdrsegmenter.word_segment(output_text)[0].split()
 
-    return [(detokenize(tokens), score) for score, tokens in suggestions]
+        for i in range(0, 3):
+            segmented_text_cropped = segmented_text[:len(prompt_segmented) + i]
+
+            if segmented_text_cropped != prompt_segmented and segmented_text_cropped not in result:
+                result.append(segmented_text_cropped)
+
+
+    return [' '.join(item).replace('_', ' ') for item in result]
 
 def expand_query_enhanced(token, model, topn=5, similarity_threshold=0.5):
     expanded_tokens = [(token, 1.0)]
@@ -113,25 +122,6 @@ def expand_query_enhanced(token, model, topn=5, similarity_threshold=0.5):
 
 def should_expand_token(token, stopwords, min_length=3):
     return not (token.lower() in stopwords or len(token) < min_length or token.isnumeric())
-
-def filter_redundant_ngrams(word_counts, coverage_threshold=0.8):
-    """Remove n-grams that are largely covered by other n-grams"""
-    sorted_ngrams = sorted(word_counts.items(), key=lambda x: x[1], reverse=True)
-    filtered = {}
-    covered_words = set()
-    
-    for ngram, weight in sorted_ngrams:
-        words = set(ngram.split())
-        
-        # Calculate how much this n-gram overlaps with already selected ones
-        overlap_ratio = len(words.intersection(covered_words)) / len(words) if words else 1
-        
-        # Keep if it adds significant new information or is highly weighted
-        if overlap_ratio < coverage_threshold or len(filtered) < 3:
-            filtered[ngram] = weight
-            covered_words.update(words)
-    
-    return filtered
 
 def expand_query_enhanced(token, model, topn=5, similarity_threshold=0.5):
     expanded_tokens = [(token, 1.0)]
@@ -250,7 +240,9 @@ def rank_documents_by_query_enhanced(query,
                                      max_ngrams=20,
                                      bert_model=None,
                                      bert_tokenizer=None,
-                                     kenlm_model=None
+                                     kenlm_model=None,
+                                     generative_model=None,
+                                     generative_tokenizer=None
                                      ):
     # Annotation & subject token extraction
     segmented = tokenizer.word_segment(query)[0]
@@ -355,9 +347,9 @@ def rank_documents_by_query_enhanced(query,
     cosine_sim = cosine_similarity([query_vector], tfidf_matrix)[0]
     ranked = sorted(zip(article_ids, cosine_sim), key=lambda x: x[1], reverse=True)
 
-    normalized_vocab = [w.replace(" ", "_") for w in word_model.wv.key_to_index]
+    tokens_without_mark = [t.replace("_", " ") for t in query_tokens]
 
-    print(f'\nTest test: ', query_tokens)
-    print(f'\nTest test: ', generate_progressive_suggestions(kenlm_model, query_tokens, normalized_vocab, top_k=5))
+    print(f'\nTest test: ', tokens_without_mark)
+    print(f'\nTest test: ', generate_vietnamese_sentences(query_tokens_str, generative_model, generative_tokenizer, tokenizer))
 
     return ranked, phrase_weights, word_counts, dependency_phrases
