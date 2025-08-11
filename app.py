@@ -205,13 +205,22 @@ st.markdown("""
 
 
 
-# --- Session defaults (state-driven like streamlit_v2) ---
+# --- Session defaults ---
 if "is_processing" not in st.session_state:
     st.session_state.is_processing = False
 if "last_query" not in st.session_state:
     st.session_state.last_query = ""
 if "last_mode" not in st.session_state:
     st.session_state.last_mode = COSINE_SEARCH
+if "queued_query" not in st.session_state:
+    st.session_state.queued_query = None
+
+# If something queued a search on the previous run, start it now
+if st.session_state.queued_query:
+    st.session_state.last_query = st.session_state.queued_query
+    st.session_state.is_processing = True
+    st.session_state.queued_query = None
+
 
 # =========================
 #        HEADER (static)
@@ -253,32 +262,31 @@ if do_search and query_input.strip():
     st.session_state.is_processing = True
 
 # =========================
-#          BODY
+#          BODY 
 # =========================
 body = st.empty()
+
+def _trigger_search_with_original(q):
+    st.session_state.forceNoSpellCorrection = True   
+    st.session_state.last_query = q
+    st.session_state.is_processing = True            # enter processing branch next run
+
 
 def render_results(results, shown_query, original_query):
     with body.container():
         # Header lines
         st.success(f"🔎 Results for **{shown_query}**")
 
-        # If we showed a corrected query, offer to search the original
         if shown_query != original_query:
-            btn_label = f"_Search instead for_ **{original_query}**"
-            if st.button(btn_label, key=f"search_instead_{original_query}"):
-                st.session_state.forceNoSpellCorrection = False
-                st.session_state.last_query = original_query
-                st.session_state.is_processing = True
-                st.rerun()
+            st.button(
+                f"_Search instead for: **{original_query}**_",
+                type="tertiary",
+                key=f"search_instead_{original_query}",
+                icon="❗",
+                on_click=_trigger_search_with_original,
+                args=(original_query,),
+            )    
 
-            # Apply style class to the last rendered button
-            st.markdown(
-                "<script>"
-                "var btns = window.parent.document.querySelectorAll('button[kind=secondary]');"
-                "if(btns.length > 0) btns[btns.length-1].classList.add('search-instead-btn');"
-                "</script>",
-                unsafe_allow_html=True
-            )
 
         for r in results:
             image_url = "https://baosoctrang.org.vn" + r.get("avatarApp", "")
@@ -299,6 +307,14 @@ def render_results(results, shown_query, original_query):
                 st.markdown(f"<p style='margin-top: 2px'>{r['content'][:500]}...</p>", unsafe_allow_html=True)
             st.markdown("<hr style='margin: 20px 0;'>", unsafe_allow_html=True)
 
+
+print("=====================================")
+print("is_processing:", st.session_state.is_processing)
+print("last_query:", st.session_state.last_query)
+print("last_mode:", st.session_state.last_mode)
+print("queued_query:", st.session_state.queued_query)
+print("forceNoSpellCorrection:", st.session_state.forceNoSpellCorrection)
+print("=====================================")
 
 # If we’re processing, show spinner + run the search, all inside BODY only
 if st.session_state.is_processing:
@@ -327,6 +343,6 @@ if st.session_state.is_processing:
     st.session_state.is_processing = False
     render_results(results, searchQuery, original_query)
 else:
-    # First load or idle state: if we already have a last_query, show last results area title
-    if st.session_state.last_query.strip():
-        body.markdown("### Search Results")
+    with body.container():
+        st.markdown("<h2>Welcome to the Search UI</h2>", unsafe_allow_html=True)
+        st.markdown("Type your query above and click the search button to find articles.")
