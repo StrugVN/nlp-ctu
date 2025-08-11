@@ -251,9 +251,7 @@ def rank_documents_by_query_enhanced(query,
 
     query_tokens = []
     for token in segmented.split(' '):
-        print(f'Processing token: {token}')
         if token.replace("_", " ").lower() not in stopwords and len(token) > 1:
-            print('Y')
             query_tokens.append(token)
 
     annotated = tokenizer.annotate_text(query)[0]
