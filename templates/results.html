@@ -1,10 +1,60 @@
 {% extends "base.html" %}
+
+{% macro page_url(p) -%}
+  {{ url_for('search',
+             q=original_query,
+             mode=last_mode,
+             limit=limit,
+             page=p) }}
+{%- endmacro %}
+
 {% block content %}
   <main class="main">
-    <div class="notice success">🔎 Results for <strong>{{ shown_query }}</strong></div>
+    <div class="notice success">🔎 Kết quả tìm kiếm <strong>{{ shown_query }}</strong></div>
     {% if shown_query != original_query %}
-      <a class="search-instead" href="{{ url_for('search_instead', q=original_query) }}">Search instead for: <strong>{{ original_query }}</strong></a>
+      <a class="search-instead" href="{{ url_for('search_instead', q=original_query) }}">Tìm kiếm thay thế cho: <strong>{{ original_query }}</strong></a>
     {% endif %}
+
+    <div class="results-header">
+    <span class="results-count">Tổng: <strong>{{ total }}</strong> bài viết</span>
+
+    {% if total_pages > 1 %}
+    <nav class="paginator">
+      {% if page > 1 %}
+        <a class="page-btn" href="{{ page_url(page-1) }}">&laquo; Trước</a>
+      {% else %}
+        <span class="page-btn disabled">&laquo; Trước</span>
+      {% endif %}
+
+      {% set start = 1 if page-2 < 1 else page-2 %}
+      {% set end = total_pages if page+2 > total_pages else page+2 %}
+
+      {% if start > 1 %}
+        <a class="page-btn" href="{{ page_url(1) }}">1</a>
+        {% if start > 2 %}<span class="page-ellipsis">…</span>{% endif %}
+      {% endif %}
+
+      {% for p in range(start, end + 1) %}
+        {% if p == page %}
+          <span class="page-btn current">{{ p }}</span>
+        {% else %}
+          <a class="page-btn" href="{{ page_url(p) }}">{{ p }}</a>
+        {% endif %}
+      {% endfor %}
+
+      {% if end < total_pages %}
+        {% if end < total_pages - 1 %}<span class="page-ellipsis">…</span>{% endif %}
+        <a class="page-btn" href="{{ page_url(total_pages) }}">{{ total_pages }}</a>
+      {% endif %}
+
+      {% if page < total_pages %}
+        <a class="page-btn" href="{{ page_url(page+1) }}">Sau &raquo;</a>
+      {% else %}
+        <span class="page-btn disabled">Sau &raquo;</span>
+      {% endif %}
+    </nav>
+    {% endif %}
+  </div>
 
     {% for r in results %}
       {% set image_url = 'https://baosoctrang.org.vn' ~ (r.get('avatarApp','') if r else '') %}

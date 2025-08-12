@@ -3,10 +3,18 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>{{ title if title else "Search UI" }}</title>
+  <title>{{ title if title else "Tìm kiếm - Báo Sóc Trăng" }}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
+
 <body>
+  <header class="site-logo">
+    <a href="{{ url_for('home') }}">
+      <img src="https://baosoctrang.org.vn/common/v1/images/logo.png" alt="Báo Sóc Trăng logo">
+    </a>
+  </header>
+
+
   <div class="container">
     <header class="header">
       <form action="{{ url_for('search') }}" method="get" class="search-form">
@@ -14,51 +22,79 @@
           <option value="MongoDB" {{ 'selected' if last_mode == 'MongoDB' else '' }}>MongoDB</option>
           <option value="Cosine" {{ 'selected' if last_mode == 'Cosine' else '' }}>Cosine</option>
         </select>
-        <input id="search-input" type="text" name="q" value="{{ last_query or '' }}" placeholder="Search." autocomplete="off"/>
+        <input id="search-input" type="text" name="q" value="{{ last_query or '' }}" placeholder="Tìm kiếm" autocomplete="off"/>
         <button type="submit" class="icon-btn" title="Search">🔍</button>
       </form>
       <ul id="suggestions" class="suggestions"></ul>
     </header>
     {% block content %}{% endblock %}
   </div>
+
   <script>
-    // Simple autocomplete hitting /api/autocomplete
     const input = document.getElementById('search-input');
     const suggestions = document.getElementById('suggestions');
-    let controller = null;
 
-    function clearSuggestions(){
+    let controller = null;
+    let debounceTimer = null;
+    let composing = false; // for IME languages
+
+    function renderSuggestions(list){
+      suggestions.innerHTML = '';
+      list.forEach(s => {
+        const li = document.createElement('li');
+        li.textContent = s;
+        li.addEventListener('click', () => {
+          input.value = s;
+          hideSuggestions();
+          input.focus();
+        });
+        suggestions.appendChild(li);
+      });
+      suggestions.style.display = list.length ? 'block' : 'none';
+    }
+
+    function hideSuggestions(){
       suggestions.innerHTML = '';
       suggestions.style.display = 'none';
     }
 
-    input && input.addEventListener('input', async (e) => {
-      const q = e.target.value.trim();
-      if (!q) { clearSuggestions(); return; }
+    async function fetchAutocomplete(q){
+      if (!q.trim()) {
+        hideSuggestions();
+        return;
+      }
       try {
         controller && controller.abort();
         controller = new AbortController();
-        const res = await fetch(`/api/autocomplete?q=${encodeURIComponent(q)}`, {signal: controller.signal});
-        const data = await res.json();
-        suggestions.innerHTML = '';
-        data.forEach(s => {
-          const li = document.createElement('li');
-          li.textContent = s;
-          li.addEventListener('click', () => {
-            input.value = s;
-            clearSuggestions();
-          });
-          suggestions.appendChild(li);
+        const res = await fetch(`/api/autocomplete?q=${encodeURIComponent(q.trim())}`, {
+          signal: controller.signal
         });
-        suggestions.style.display = data.length ? 'block' : 'none';
+        const data = await res.json();
+        renderSuggestions(Array.isArray(data) ? data : []);
       } catch (err) {
-        clearSuggestions();
+        // ignore abort errors
       }
+    }
+
+    // IME handling
+    input.addEventListener('compositionstart', () => composing = true);
+    input.addEventListener('compositionend', () => {
+      composing = false;
+    });
+
+    input.addEventListener('input', () => {
+      if (composing) return;
+      hideSuggestions();
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        fetchAutocomplete(input.value);
+      }, 200); 
     });
 
     document.addEventListener('click', (e) => {
-      if (!suggestions.contains(e.target) && e.target !== input) clearSuggestions();
+      if (!suggestions.contains(e.target) && e.target !== input) hideSuggestions();
     });
   </script>
+
 </body>
 </html>

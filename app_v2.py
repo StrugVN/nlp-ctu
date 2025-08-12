@@ -15,6 +15,9 @@ import py_vncorenlp
 from gensim.models import Word2Vec
 from transformers import AutoTokenizer, AutoModel, AutoModelForCausalLM
 
+from math import ceil
+from collections import OrderedDict
+
 from query_processing import (
     beam_search_kenlm,
     load_vocab_from_file,
@@ -161,7 +164,27 @@ def warm_resources():
 warm_resources()
 
 # --- Business logic ---
-def search_articles_enhanced(query, top_k=10):
+# -------- In-memory LRU cache for result id lists (cosine mode) --------
+RESULTS_CACHE = OrderedDict()
+CACHE_CAPACITY = 64  
+
+def _cache_make_key(query: str, mode: str) -> str:
+    return f"{mode}|{query.strip().lower()}"
+
+def _cache_get(key: str):
+    if key in RESULTS_CACHE:
+        RESULTS_CACHE.move_to_end(key)
+        return RESULTS_CACHE[key]
+    return None
+
+def _cache_set(key: str, value):
+    RESULTS_CACHE[key] = value
+    RESULTS_CACHE.move_to_end(key)
+    if len(RESULTS_CACHE) > CACHE_CAPACITY:
+        RESULTS_CACHE.popitem(last=False) 
+
+
+def search_articles_enhanced(query, limit=10, offset=0):
     stopwords        = load_stopwords()
     kenMlModel       = load_kenlm_model()
     detokenize       = load_detokenizer()
@@ -191,12 +214,16 @@ def search_articles_enhanced(query, top_k=10):
         generative_model=model_gpt_vi,
         generative_tokenizer=tokenizer_gpt_vi
     )
-    result_ids = results[:top_k]
+    
+    result_ids = results[offset : offset + limit]
+
     result_articles = list(article_collection.find({
         "id": {"$in": [item[0] for item in result_ids]}
     }))
     id_to_article = {article["id"]: article for article in result_articles}
+
     sorted_articles = [id_to_article.get(item[0]) for item in result_ids if item[0] in id_to_article]
+
     return sorted_articles
 
 def autocomplete(query):
@@ -207,7 +234,7 @@ def autocomplete(query):
     tokenizer_gpt_vi = load_gpt2_tokenizer()
     model_gpt_vi = load_gpt2_model()
 
-    sentence_list = generate_vietnamese_sentences(query, model_gpt_vi, tokenizer_gpt_vi, rdrsegmenter)
+    sentence_list = generate_vietnamese_sentences(query, model_gpt_vi, tokenizer_gpt_vi, rdrsegmenter, kenMlModel, load_detokenizer())
     sentence_list = sorted(sentence_list, key=lambda x: kenMlModel.score(x), reverse=True)
     return sentence_list[:5]
 
@@ -220,19 +247,24 @@ def ensure_session_defaults():
 
 @app.route("/", methods=["GET"])
 def home():
+    session["last_query"] = ""
     q = session.get("last_query", "")
     mode = session.get("last_mode", "Cosine")
-    suggestions = autocomplete(q) if q else []
-    return render_template("index.html", last_query=q, last_mode=mode, suggestions=suggestions)
+    
+    return render_template("index.html", last_query='', last_mode=mode, suggestions=[])
 
 @app.route("/search", methods=["GET", "POST"])
 def search():
     if request.method == "POST":
         q = request.form.get("q", "").strip()
         mode = request.form.get("mode", "Cosine")
+        page = int(request.form.get("page", 1) or 1)
+        limit = int(request.form.get("limit", 10) or 10)
     else:
         q = request.args.get("q", "").strip()
         mode = request.args.get("mode", "Cosine")
+        page = int(request.args.get("page", 1) or 1)
+        limit = int(request.args.get("limit", 10) or 10)
 
     if not q:
         return redirect(url_for("home"))
@@ -246,6 +278,7 @@ def search():
     original_query = q
     search_query = q
 
+    # spell-correction unless bypassed
     if not session.get("forceNoSpellCorrection", False):
         try:
             beamResult = beam_search_kenlm(search_query.lower().split(), kenMlModel)
@@ -255,28 +288,88 @@ def search():
             pass
     session["forceNoSpellCorrection"] = False
 
+    # paging math
+    page = max(1, page)
+    limit = max(1, min(50, limit))  # cap to something reasonable
+    offset = (page - 1) * limit
+
     if mode == "MongoDB":
-        results = list(
-            article_collection.find(
-                {"$text": {"$search": original_query}},
-                {"score": {"$meta": "textScore"}}
-            )
+        # total (Mongo text search)
+        filter_ = {"$text": {"$search": original_query}}
+        total = article_collection.count_documents(filter_)
+
+        # page slice
+        cursor = (
+            article_collection.find(filter_, {"score": {"$meta": "textScore"}})
             .sort([("score", {"$meta": "textScore"})])
-            .limit(10)
+            .skip(offset)
+            .limit(limit)
         )
+        results = list(cursor)
         shown_query = original_query
+
     else:
-        results = search_articles_enhanced(search_query, top_k=10)
+        # Cosine/enhanced mode with cache
+        key = _cache_make_key(search_query, mode)
+        cached_ids = _cache_get(key)
+
+        if cached_ids is None:
+            # compute full ranking once
+            stopwords        = load_stopwords()
+            rdrsegmenter     = load_segmenter()
+            vocab            = load_vocab()
+            word2vec_model   = load_w2v()
+            vectorizer       = load_vectorizer()
+            tfidf_matrix     = load_tfidf_matrix()
+            article_ids      = load_article_ids()
+            vibert_model     = load_vibert_model()
+            vibert_tokenizer = load_vibert_tokenizer()
+            tokenizer_gpt_vi = load_gpt2_tokenizer()
+            model_gpt_vi     = load_gpt2_model()
+
+            results_full, stats, weights, groups = rank_documents_by_query_enhanced(
+                query=search_query,
+                tfidf_matrix=tfidf_matrix,
+                word_model=word2vec_model,
+                tokenizer=rdrsegmenter,
+                stopwords=stopwords,
+                vectorizer=vectorizer,
+                article_ids=article_ids,
+                ngram_max=6,
+                bert_model=vibert_model,
+                bert_tokenizer=vibert_tokenizer,
+                kenlm_model=kenMlModel,
+                generative_model=model_gpt_vi,
+                generative_tokenizer=tokenizer_gpt_vi
+            )
+            # keep only the IDs (in order)
+            cached_ids = [item[0] for item in results_full]
+            _cache_set(key, cached_ids)
+
+        total = len(cached_ids)
+        slice_ids = cached_ids[offset: offset + limit]
+
+        # fetch those articles (keep order)
+        result_articles = list(article_collection.find({"id": {"$in": slice_ids}}))
+        id_to_article = {a["id"]: a for a in result_articles}
+        results = [id_to_article.get(_id) for _id in slice_ids if _id in id_to_article]
         shown_query = search_query
 
-    suggestions = autocomplete(search_query)
+    total_pages = max(1, ceil(total / limit))
+
+    suggestions = []  # don’t auto-hit autocomplete here
     return render_template(
         "results.html",
         results=results,
         original_query=original_query,
         shown_query=shown_query,
         last_mode=mode,
-        suggestions=suggestions
+        last_query=original_query,  # keep user input in the box
+        suggestions=suggestions,
+        page=page,
+        limit=limit,
+        total=total,
+        total_pages=total_pages
     )
 
 @app.route("/search_instead")
@@ -295,4 +388,4 @@ def api_autocomplete():
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port, debug=True, use_reloader=False)
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)

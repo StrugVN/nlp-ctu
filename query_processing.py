@@ -9,6 +9,7 @@ from itertools import product
 from collections import defaultdict
 from itertools import combinations
 import torch
+from heapq import nlargest
 
 def remove_vn_accent(word):
     word = re.sub('[áàảãạăắằẳẵặâấầẩẫậ]', 'a', word)
@@ -35,23 +36,33 @@ def gen_accents_word_cached(word):
     key = remove_vn_accent(word.lower())
     return ACCENT_LOOKUP.get(key, {word})
 
-def beam_search_kenlm(words, model, k=3, force=False):
+def beam_search_kenlm(words, model, k=3, max_len=None, force=False):
     if not needs_diacritic_restoration(" ".join(words)) and not force:
         return []
 
-    variants = [list(gen_accents_word_cached(w)) for w in words]
-    sequences = [([], 0.0)]  
+    variants = [gen_accents_word_cached(w) for w in words]
+
+    sequences = [([], 0.0, "")]
 
     for word_options in variants:
         new_sequences = []
-        for seq, score in sequences:
-            prefix = " ".join(seq[-2:]) if len(seq) >= 2 else " ".join(seq)
-            for word in word_options:
-                full = f"{prefix} {word}".strip()
-                new_score = model.score(full, bos=False, eos=False)
-                new_sequences.append((seq + [word], score + new_score))
-        new_sequences.sort(key=lambda x: x[1], reverse=True)
-        sequences = new_sequences[:k]
+        for tokens, cum_lp, text in sequences:
+            prefix_lp = model.score(text, bos=False, eos=False) if text else 0.0
+
+            for w in word_options:
+                new_text = (text + " " + w).strip()
+                full_lp = model.score(new_text, bos=False, eos=False)
+                inc_lp = full_lp - prefix_lp  
+                new_tokens = tokens + [w]
+
+                if max_len and len(new_tokens) > max_len:
+                    continue
+
+                new_sequences.append((new_tokens, cum_lp + inc_lp, new_text))
+
+        sequences = nlargest(k, new_sequences, key=lambda x: x[1])
+        if not sequences:
+            break
 
     return sequences
 
@@ -72,8 +83,12 @@ def load_vocab_from_file(path='vietDict.txt'):
         return [w.strip() for w in f if w.strip() and w.strip() not in ('<s>', '</s>', '<unk>')]
 
 
-def generate_vietnamese_sentences(prompt, model, tokenizer, rdrsegmenter, device='cpu',  do_sample=True, top_p=0.9, top_k=50, temperature=0.8):
+def generate_vietnamese_sentences(prompt, model, tokenizer, rdrsegmenter, kenMlModel, detokenize, device='cpu',  do_sample=True, top_p=0.9, top_k=50, temperature=0.8):
     prompt = prompt.strip()
+
+    beamResult = beam_search_kenlm(prompt.lower().split(), kenMlModel)
+    if beamResult:
+        prompt = detokenize(beamResult[0][0])
     
     inputs = tokenizer(prompt, return_tensors="pt").to(device)
 
@@ -82,7 +97,7 @@ def generate_vietnamese_sentences(prompt, model, tokenizer, rdrsegmenter, device
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
-            max_new_tokens=max_new_tokens,
+            max_new_tokens=max(max_new_tokens, 3),
             do_sample=do_sample,
             top_p=top_p,
             top_k=top_k,
@@ -106,8 +121,15 @@ def generate_vietnamese_sentences(prompt, model, tokenizer, rdrsegmenter, device
             if segmented_text_cropped != prompt_segmented and segmented_text_cropped not in result:
                 result.append(segmented_text_cropped)
 
+    max_len = len(prompt_segmented) + 2
+    result_sentences = [
+        ' '.join(item[:max_len]).replace('_', ' ')
+        for item in result
+    ]
 
-    return [' '.join(item).replace('_', ' ') for item in result]
+    result_sentences.sort(key=lambda x: kenMlModel.score(x) / len(x.split()), reverse=True)
+
+    return result_sentences
 
 def expand_query_enhanced(token, model, topn=5, similarity_threshold=0.5):
     expanded_tokens = [(token, 1.0)]
@@ -244,7 +266,7 @@ def rank_documents_by_query_enhanced(query,
                                      generative_model=None,
                                      generative_tokenizer=None
                                      ):
-    # Annotation & subject token extraction
+
     segmented = tokenizer.word_segment(query)[0]
 
     print(f'\nSegmented query: {segmented}')
@@ -344,5 +366,10 @@ def rank_documents_by_query_enhanced(query,
 
     cosine_sim = cosine_similarity([query_vector], tfidf_matrix)[0]
     ranked = sorted(zip(article_ids, cosine_sim), key=lambda x: x[1], reverse=True)
+
+    top_score = ranked[0][1]
+    min_similarity = max(0.05, top_score * 0.2)
+
+    ranked = [(doc_id, sim) for doc_id, sim in ranked if sim > min_similarity]
 
     return ranked, phrase_weights, word_counts, dependency_phrases
