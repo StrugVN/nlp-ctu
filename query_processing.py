@@ -345,9 +345,4 @@ def rank_documents_by_query_enhanced(query,
     cosine_sim = cosine_similarity([query_vector], tfidf_matrix)[0]
     ranked = sorted(zip(article_ids, cosine_sim), key=lambda x: x[1], reverse=True)
 
-    tokens_without_mark = [t.replace("_", " ") for t in query_tokens]
-
-    print(f'\nTest test: ', tokens_without_mark)
-    print(f'\nTest test: ', generate_vietnamese_sentences(query_tokens_str, generative_model, generative_tokenizer, tokenizer))
-
     return ranked, phrase_weights, word_counts, dependency_phrases

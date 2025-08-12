@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>{{ title if title else "Search UI" }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <form action="{{ url_for('search') }}" method="get" class="search-form">
+        <select name="mode" class="select">
+          <option value="MongoDB" {{ 'selected' if last_mode == 'MongoDB' else '' }}>MongoDB</option>
+          <option value="Cosine" {{ 'selected' if last_mode == 'Cosine' else '' }}>Cosine</option>
+        </select>
+        <input id="search-input" type="text" name="q" value="{{ last_query or '' }}" placeholder="Search." autocomplete="off"/>
+        <button type="submit" class="icon-btn" title="Search">🔍</button>
+      </form>
+      <ul id="suggestions" class="suggestions"></ul>
+    </header>
+    {% block content %}{% endblock %}
+  </div>
+  <script>
+    // Simple autocomplete hitting /api/autocomplete
+    const input = document.getElementById('search-input');
+    const suggestions = document.getElementById('suggestions');
+    let controller = null;
+
+    function clearSuggestions(){
+      suggestions.innerHTML = '';
+      suggestions.style.display = 'none';
+    }
+
+    input && input.addEventListener('input', async (e) => {
+      const q = e.target.value.trim();
+      if (!q) { clearSuggestions(); return; }
+      try {
+        controller && controller.abort();
+        controller = new AbortController();
+        const res = await fetch(`/api/autocomplete?q=${encodeURIComponent(q)}`, {signal: controller.signal});
+        const data = await res.json();
+        suggestions.innerHTML = '';
+        data.forEach(s => {
+          const li = document.createElement('li');
+          li.textContent = s;
+          li.addEventListener('click', () => {
+            input.value = s;
+            clearSuggestions();
+          });
+          suggestions.appendChild(li);
+        });
+        suggestions.style.display = data.length ? 'block' : 'none';
+      } catch (err) {
+        clearSuggestions();
+      }
+    });
+
+    document.addEventListener('click', (e) => {
+      if (!suggestions.contains(e.target) && e.target !== input) clearSuggestions();
+    });
+  </script>
+</body>
+</html>

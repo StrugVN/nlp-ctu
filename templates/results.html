@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+  <main class="main">
+    <div class="notice success">🔎 Results for <strong>{{ shown_query }}</strong></div>
+    {% if shown_query != original_query %}
+      <a class="search-instead" href="{{ url_for('search_instead', q=original_query) }}">Search instead for: <strong>{{ original_query }}</strong></a>
+    {% endif %}
+
+    {% for r in results %}
+      {% set image_url = 'https://baosoctrang.org.vn' ~ (r.get('avatarApp','') if r else '') %}
+      {% set page_url  = 'https://baosoctrang.org.vn' ~ (r.get('pageUrl','') if r else '') %}
+      <div class="result">
+        <div class="result-image">
+          {% if image_url %}<img src="{{ image_url }}" alt="thumbnail" />{% endif %}
+        </div>
+        <div class="result-body">
+          <h3 class="result-title"><a href="{{ page_url }}" target="_blank">{{ r['title'] }}</a></h3>
+          <p class="result-snippet">{{ (r['content'] or '')[:500] }}...</p>
+        </div>
+      </div>
+      <hr/>
+    {% endfor %}
+  </main>
+{% endblock %}

@@ -1,5 +1,6 @@
 import os
 import time
+from exceptiongroup import catch
 import joblib
 from nltk.tokenize.treebank import TreebankWordDetokenizer
 import streamlit as st
@@ -12,7 +13,7 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 import concurrent.futures
 import kenlm
-from query_processing import beam_search_kenlm, load_vocab_from_file, rank_documents_by_query_enhanced, similarity_viBERT
+from query_processing import beam_search_kenlm, load_vocab_from_file, rank_documents_by_query_enhanced, generate_vietnamese_sentences
 from gensim.models import Word2Vec
 import re
 import joblib
@@ -165,6 +166,14 @@ def search_articles_enhanced(query, top_k=10):
         sorted_articles = [id_to_article[item[0]] for item in result_ids if item[0] in id_to_article]
         print(f'\nTokenized query: {weights}')
         return sorted_articles
+    
+
+def auto_complete(query):
+    sentence_list = generate_vietnamese_sentences(query, model_gpt_vi, tokenizer_gpt_vi, rdrsegmenter)
+
+    sentence_list = sorted(sentence_list, key=lambda x: kenMlModel.score(x), reverse=True)
+
+    return sentence_list
 
 # --- Constants ---
 MONGO_SEARCH = "MongoDB"
@@ -238,21 +247,28 @@ with colB:
         label_visibility="collapsed",
     )
 
-# Row 2: input + button (no form; same visual)
-cols = st.columns([5, 1])
-with cols[0]:
-    # keep value persistent so users can edit and re-search
-    query_input = st.text_input(
-        "Search box",
-        value=st.session_state.last_query,
-        placeholder="Search...",
-        label_visibility="collapsed",
-        key="query_input_text",
-        disabled=st.session_state.is_processing,
-    )
-with cols[1]:
-    do_search = st.button("🔍", use_container_width=True, disabled=st.session_state.is_processing)
+# Row 2: input + button (ENTER submits too)
+with st.form("search_form", clear_on_submit=False):
+    cols = st.columns([5, 1])
+    with cols[0]:
+        # keep value persistent so users can edit and re-search
+        query_input = st.text_input(
+            "Search box",
+            value=st.session_state.last_query,
+            placeholder="Search.",
+            label_visibility="collapsed",
+            key="query_input_text",
+            #disabled=st.session_state.is_processing,
+        )
+    with cols[1]:
+        do_search = st.form_submit_button(
+            "🔍"
+        )  # Enter now triggers this too
 
+suggestions = auto_complete(query_input) if query_input else []
+
+
+st.markdown("</div>", unsafe_allow_html=True)
 st.markdown("</div>", unsafe_allow_html=True)
 
 # Clicking the button updates state; header stays visible, body updates
@@ -267,7 +283,8 @@ if do_search and query_input.strip():
 body = st.empty()
 
 def _trigger_search_with_original(q):
-    st.session_state.forceNoSpellCorrection = True   
+    print('Triggering search with original query:', q)
+    st.session_state.forceNoSpellCorrection = True
     st.session_state.last_query = q
     st.session_state.is_processing = True            # enter processing branch next run
 
@@ -318,30 +335,44 @@ print("=====================================")
 
 # If we’re processing, show spinner + run the search, all inside BODY only
 if st.session_state.is_processing:
+    print(">>>>>>>>>>>>>>>>>>>>>>>>Processing search<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
+    
+    original_query = st.session_state.last_query
+    searchQuery = original_query
+    beamResult = beam_search_kenlm(searchQuery.lower().split(), kenMlModel)
+    if not st.session_state.forceNoSpellCorrection and beamResult:
+        searchQuery = detokenize(beamResult[0][0])
+    st.session_state.forceNoSpellCorrection = False
+    
+    try:
+        print(f'Test suggestion: ', auto_complete(searchQuery))
+    except Exception as e:
+        print(f"Error generating suggestions: {e}")
+
     with body.container():
-        original_query = st.session_state.last_query
-        searchQuery = original_query
-        st.success(f"🔎 You searched for: **{original_query}**")
         # Run the search according to mode
         if st.session_state.last_mode == MONGO_SEARCH:
-            results = list(
-                article_collection.find(
-                    {"$text": {"$search": original_query}},
-                    {"score": {"$meta": "textScore"}}
+            st.info(f"🔎 You searched for: **{original_query}**")
+            
+            with st.spinner("Searching articles..."):
+                results = list(
+                    article_collection.find(
+                        {"$text": {"$search": original_query}},
+                        {"score": {"$meta": "textScore"}}
+                    )
+                    .sort([("score", {"$meta": "textScore"})])
+                    .limit(10)
                 )
-                .sort([("score", {"$meta": "textScore"})])
-                .limit(10)
-            )
+
+            render_results(results, original_query, original_query)
         else:
-            searchQuery = original_query
-            beamResult = beam_search_kenlm(searchQuery.lower().split(), kenMlModel)
-            if not st.session_state.forceNoSpellCorrection and beamResult:
-                searchQuery = detokenize(beamResult[0][0])
+            st.info(f"🔎 Searching for: **{searchQuery}**")
             results = search_articles_enhanced(searchQuery)
+            
+            render_results(results, searchQuery, original_query)
 
     # After work, replace spinner with results
     st.session_state.is_processing = False
-    render_results(results, searchQuery, original_query)
 else:
     with body.container():
         st.markdown("<h2>Welcome to the Search UI</h2>", unsafe_allow_html=True)
